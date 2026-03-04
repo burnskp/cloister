@@ -1,0 +1,11 @@
+[package]
+name = "cloister-wayland-validate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wayrs-client = "1.1"
+
+[profile.release]
+strip = true
+lto = true

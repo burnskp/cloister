@@ -1,0 +1,12 @@
+[package]
+name = "cloister-dbus-validate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+strip = true
+lto = true

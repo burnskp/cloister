@@ -1,0 +1,37 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks
+        entry: gitleaks protect --staged --redact
+        language: system
+        pass_filenames: false
+      - id: treefmt
+        name: treefmt
+        entry: treefmt
+        language: system
+        types: [nix]
+      - id: statix
+        name: statix
+        entry: statix check .
+        language: system
+        pass_filenames: false
+        types: [nix]
+      - id: deadnix
+        name: deadnix
+        entry: deadnix --fail
+        language: system
+        types: [nix]
+      - id: flake-check
+        name: nix flake check
+        entry: nix flake check
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
