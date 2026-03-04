@@ -28,6 +28,49 @@ let
     in
     result.config;
 
+  # Like evalConfig but bypasses homeManagerConfiguration's eager assertion
+  # checking (moduleChecks).  This lets callers inspect config.assertions as
+  # data instead of catching a throw.
+  evalConfigUnchecked =
+    { modules }:
+    let
+      extendedLib = import "${home-manager}/modules/lib/stdlib-extended.nix" lib;
+      hmModules = import "${home-manager}/modules/modules.nix" {
+        check = true;
+        inherit pkgs;
+        lib = extendedLib;
+      };
+      configuration =
+        { ... }:
+        {
+          imports = [
+            cloister-module
+            {
+              home = {
+                username = "testuser";
+                homeDirectory = "/home/testuser";
+                stateVersion = "25.05";
+              };
+            }
+          ]
+          ++ modules
+          ++ [
+            { programs.home-manager.path = "${home-manager}"; }
+          ];
+          nixpkgs = {
+            config = lib.mkDefault pkgs.config;
+            inherit (pkgs) overlays;
+          };
+        };
+    in
+    (extendedLib.evalModules {
+      modules = [ configuration ] ++ hmModules;
+      class = "homeManager";
+      specialArgs = {
+        modulesPath = builtins.toString "${home-manager}/modules";
+      };
+    }).config;
+
   # Turn a boolean eval-time check into a derivation.
   # Passes: touch $out. Fails: exit 1 with message.
   mkCheck =
@@ -73,65 +116,18 @@ let
     '';
 
   # Evaluate config with given modules and check that an assertion fires
-  # containing the expected message substring.
-  #
-  # homeManagerConfiguration eagerly checks assertions and throws before
-  # returning, so we use builtins.tryEval to catch the throw.  We verify
-  # the message by also attempting to read config.assertions directly —
-  # if that path is reachable we match the substring; if the throw is
-  # too early we accept the failure as confirmation the assertion fired.
+  # containing the expected message substring.  Uses evalConfigUnchecked
+  # to bypass homeManagerConfiguration's eager assertion throw so we can
+  # inspect config.assertions as data.
   mkAssertionCheck =
     name: modules: expectedMessage:
     let
-      # First, try to get the raw config — this may throw if
-      # homeManagerConfiguration checks assertions eagerly.
-      configResult = builtins.tryEval (evalConfig {
-        inherit modules;
-      });
+      config = evalConfigUnchecked { inherit modules; };
+      failedAssertions = builtins.filter (x: !x.assertion) config.assertions;
+      messages = map (x: x.message) failedAssertions;
+      hasExpectedFailure = builtins.any (msg: lib.hasInfix expectedMessage msg) messages;
     in
-    if configResult.success then
-      # Config evaluated without throwing — check assertions as data
-      let
-        config = configResult.value;
-        failedAssertions = builtins.filter (x: !x.assertion) config.assertions;
-        messages = map (x: x.message) failedAssertions;
-        hasExpectedFailure = builtins.any (msg: lib.hasInfix expectedMessage msg) messages;
-      in
-      mkCheck name hasExpectedFailure
-    else
-      # homeManagerConfiguration threw before returning.  Try to recover
-      # the assertion messages so we can verify the *expected* assertion
-      # fired rather than accepting any throw as a pass.
-      let
-        # Re-evaluate without the assertion check wrapper so we can
-        # inspect config.assertions directly.
-        rawConfig =
-          (home-manager.lib.homeManagerConfiguration {
-            inherit pkgs;
-            modules = [
-              cloister-module
-              {
-                home = {
-                  username = "testuser";
-                  homeDirectory = "/home/testuser";
-                  stateVersion = "25.05";
-                };
-              }
-            ]
-            ++ modules;
-          }).config;
-        rawResult = builtins.tryEval rawConfig.assertions;
-        hasExpected =
-          if rawResult.success then
-            builtins.any (a: !a.assertion && lib.hasInfix expectedMessage a.message) rawResult.value
-          else
-            # Assertions themselves threw (eager evaluation); fall back to
-            # accepting the original throw as confirmation.
-            builtins.trace
-              "WARNING: mkAssertionCheck '${name}': could not verify assertion message, accepting throw as pass"
-              true;
-      in
-      mkCheck name hasExpected;
+    mkCheck name hasExpectedFailure;
 
 in
 {
