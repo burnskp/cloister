@@ -169,9 +169,15 @@ fn build_filter(
             #[cfg(target_arch = "s390x")]
             let flags_arg_index = 1;
 
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "s390x")))]
+            #[cfg(not(any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                target_arch = "s390x"
+            )))]
             let flags_arg_index = {
-                eprintln!("cloister-seccomp-filter: warning: unknown architecture, clone namespace enforcement may check the wrong argument");
+                eprintln!(
+                    "cloister-seccomp-filter: warning: unknown architecture, clone namespace enforcement may check the wrong argument"
+                );
                 0
             };
 

@@ -600,8 +600,8 @@ mod tests {
 
     #[test]
     fn ensure_files_rejects_symlink_in_parent_path() {
-        let dir = std::env::temp_dir()
-            .join(format!("cloister-ensure-symlink-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cloister-ensure-symlink-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let real_dir = dir.join("real");
         let _ = fs::create_dir_all(&real_dir);
@@ -610,15 +610,18 @@ mod tests {
 
         let target = link_dir.join("file.txt");
         let err = ensure_files(&[target.to_str().unwrap().to_string()]).unwrap_err();
-        assert!(err.contains("symlink"), "expected symlink error, got: {err}");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink error, got: {err}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn ensure_dirs_rejects_symlink_component() {
-        let dir = std::env::temp_dir()
-            .join(format!("cloister-ensuredir-symlink-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cloister-ensuredir-symlink-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let real_dir = dir.join("real");
         let _ = fs::create_dir_all(&real_dir);
@@ -627,14 +630,18 @@ mod tests {
 
         let target = link_dir.join("subdir");
         let err = ensure_dirs(&[target.to_str().unwrap().to_string()]).unwrap_err();
-        assert!(err.contains("symlink"), "expected symlink error, got: {err}");
+        assert!(
+            err.contains("symlink"),
+            "expected symlink error, got: {err}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn copy_file_succeeds_for_regular_destination() {
-        let dir = std::env::temp_dir().join(format!("cloister-copy-ok-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cloister-copy-ok-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let src = dir.join("src");
         let dest = dir.join("dest");

@@ -4,7 +4,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process;
 
-use nix::sched::{setns, CloneFlags};
+use nix::sched::{CloneFlags, setns};
 
 struct ExecArgs {
     netns: Option<String>,
@@ -181,9 +181,7 @@ fn drop_privileges() -> Result<(), String> {
         // Verify no_new_privs took effect
         let nnp = nix::libc::prctl(nix::libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
         if nnp != 1 {
-            return Err(format!(
-                "PR_GET_NO_NEW_PRIVS returned {nnp}, expected 1"
-            ));
+            return Err(format!("PR_GET_NO_NEW_PRIVS returned {nnp}, expected 1"));
         }
     }
 

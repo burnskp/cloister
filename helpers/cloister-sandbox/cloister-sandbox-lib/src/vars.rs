@@ -87,9 +87,6 @@ mod tests {
     fn handles_utf8_paths() {
         let mut vars = HashMap::new();
         vars.insert("HOME".to_string(), "/home/user".to_string());
-        assert_eq!(
-            expand_vars("$HOME/données", &vars),
-            "/home/user/données"
-        );
+        assert_eq!(expand_vars("$HOME/données", &vars), "/home/user/données");
     }
 }

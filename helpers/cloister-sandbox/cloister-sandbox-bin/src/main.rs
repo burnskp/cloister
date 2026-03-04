@@ -479,7 +479,8 @@ fn run() -> i32 {
     // Anonymized identity (synthetic /etc/passwd + /etc/group with real UID/GID)
     let (anon_passwd_path, anon_group_path);
     if config.anonymize {
-        let (anon_args, passwd, group) = features::anonymize_identity_args(&config.shell_bin, &config.sandbox_home);
+        let (anon_args, passwd, group) =
+            features::anonymize_identity_args(&config.shell_bin, &config.sandbox_home);
         extra_args.extend(anon_args);
         anon_passwd_path = passwd;
         anon_group_path = group;
@@ -547,7 +548,13 @@ fn run() -> i32 {
         Ok(result) => result,
         Err(e) => {
             eprintln!("{prefix}: args pipe setup: {e}");
-            cleanup(ssh_filter_handle, wayland_socket_path, machine_id_path, anon_passwd_path, anon_group_path);
+            cleanup(
+                ssh_filter_handle,
+                wayland_socket_path,
+                machine_id_path,
+                anon_passwd_path,
+                anon_group_path,
+            );
             process::exit(1);
         }
     };
@@ -556,13 +563,25 @@ fn run() -> i32 {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{prefix}: exec bwrap: {e}");
-            cleanup(ssh_filter_handle, wayland_socket_path, machine_id_path, anon_passwd_path, anon_group_path);
+            cleanup(
+                ssh_filter_handle,
+                wayland_socket_path,
+                machine_id_path,
+                anon_passwd_path,
+                anon_group_path,
+            );
             return 127;
         }
     };
 
     // --- 12. Cleanup ---
-    cleanup(ssh_filter_handle, wayland_socket_path, machine_id_path, anon_passwd_path, anon_group_path);
+    cleanup(
+        ssh_filter_handle,
+        wayland_socket_path,
+        machine_id_path,
+        anon_passwd_path,
+        anon_group_path,
+    );
 
     // --- 13. Exit with bwrap's exit code ---
     status
@@ -748,11 +767,9 @@ mod tests {
         let config = config_with_flags(true, false, false, false, false);
         let result = validate_xdg_runtime_dir(&config, "");
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("XDG_RUNTIME_DIR must be set when using D-Bus, Wayland, audio, or SSH features.")
-        );
+        assert!(result.unwrap_err().contains(
+            "XDG_RUNTIME_DIR must be set when using D-Bus, Wayland, audio, or SSH features."
+        ));
     }
 
     #[test]

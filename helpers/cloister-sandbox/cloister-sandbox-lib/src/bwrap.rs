@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::Command;
 
-use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::unistd::pipe2;
 
 use crate::config::{BindMode, SandboxConfig};

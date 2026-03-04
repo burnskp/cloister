@@ -300,7 +300,10 @@ mod tests {
 
         // Disallowing via the symlink should block the resolved (canonical) target
         let result = validate_disallowed_paths(&target_str, &[link_str]);
-        assert!(result.is_err(), "symlink disallowed path should match its canonical target");
+        assert!(
+            result.is_err(),
+            "symlink disallowed path should match its canonical target"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

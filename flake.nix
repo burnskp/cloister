@@ -7,6 +7,10 @@
       url = "github:nix-community/home-manager/release-25.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -14,6 +18,7 @@
       self,
       nixpkgs,
       home-manager,
+      treefmt-nix,
       ...
     }:
     let
@@ -22,6 +27,18 @@
         "aarch64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+
+      treefmtEval = forAllSystems (
+        system:
+        treefmt-nix.lib.evalModule nixpkgs.legacyPackages.${system} {
+          projectRootFile = "flake.nix";
+          programs.nixfmt = {
+            enable = true;
+            package = nixpkgs.legacyPackages.${system}.nixfmt-rfc-style;
+          };
+          programs.rustfmt.enable = true;
+        }
+      );
 
     in
     {
@@ -45,6 +62,27 @@
         }
       );
 
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            nativeBuildInputs = with pkgs; [
+              cargo
+              rustc
+              clippy
+              pkg-config
+            ];
+            buildInputs = with pkgs; [
+              libseccomp
+              wayland
+            ];
+          };
+        }
+      );
+
       checks = forAllSystems (
         system:
         let
@@ -55,6 +93,11 @@
           inherit home-manager;
           cloister-module = import ./modules/cloister;
         }
+        // {
+          treefmt = treefmtEval.${system}.config.build.check self;
+        }
       );
+
+      formatter = forAllSystems (system: treefmtEval.${system}.config.build.wrapper);
     };
 }

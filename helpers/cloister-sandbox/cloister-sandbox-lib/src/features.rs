@@ -235,11 +235,7 @@ pub fn gpu_args(shm: bool) -> Vec<String> {
     // GPU-specific /sys/dev/char/MAJ:MIN entries for DRI device node resolution
     for char_path in discover_dri_char_entries() {
         if Path::new(&char_path).exists() {
-            args.extend([
-                "--ro-bind".to_string(),
-                char_path.clone(),
-                char_path,
-            ]);
+            args.extend(["--ro-bind".to_string(), char_path.clone(), char_path]);
         }
     }
 
@@ -369,21 +365,18 @@ pub fn anonymize_identity_args(
     let pid = std::process::id();
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    let passwd_content = format!("{username}:x:{uid}:{gid}:{username}:{sandbox_home}:{shell_bin}\n");
+    let passwd_content =
+        format!("{username}:x:{uid}:{gid}:{username}:{sandbox_home}:{shell_bin}\n");
     let group_content = format!("{username}:x:{gid}:\n");
 
     let mut passwd_path = None;
     let mut group_path = None;
 
     for _ in 0..3 {
-        let passwd_candidate = temp_dir.join(format!(
-            "cloister-passwd-{pid}-{counter}-{}",
-            rand_hex()
-        ));
-        let group_candidate = temp_dir.join(format!(
-            "cloister-group-{pid}-{counter}-{}",
-            rand_hex()
-        ));
+        let passwd_candidate =
+            temp_dir.join(format!("cloister-passwd-{pid}-{counter}-{}", rand_hex()));
+        let group_candidate =
+            temp_dir.join(format!("cloister-group-{pid}-{counter}-{}", rand_hex()));
 
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
@@ -934,10 +927,7 @@ mod tests {
     fn pulseaudio_args_with_valid_socket() {
         use std::os::unix::net::UnixListener;
 
-        let dir = std::env::temp_dir().join(format!(
-            "cloister-pulse-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("cloister-pulse-test-{}", std::process::id()));
         let pulse_dir = dir.join("pulse");
         std::fs::create_dir_all(&pulse_dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -976,10 +966,8 @@ mod tests {
     fn pipewire_args_with_valid_socket() {
         use std::os::unix::net::UnixListener;
 
-        let dir = std::env::temp_dir().join(format!(
-            "cloister-pipewire-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cloister-pipewire-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -1077,7 +1065,9 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         assert!(
-            passwd.contains(&format!("devuser:x:{uid}:{gid}:devuser:/home/devuser:/bin/sh")),
+            passwd.contains(&format!(
+                "devuser:x:{uid}:{gid}:devuser:/home/devuser:/bin/sh"
+            )),
             "passwd should use custom username, got: {passwd}"
         );
 

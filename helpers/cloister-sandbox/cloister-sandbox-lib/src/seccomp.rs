@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 
-use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 
 /// Open a seccomp filter file and clear FD_CLOEXEC so it survives exec.
 /// Returns the raw FD number to pass to `bwrap --seccomp <fd>`.

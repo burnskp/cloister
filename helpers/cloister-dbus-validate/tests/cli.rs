@@ -4,8 +4,11 @@ fn bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cloister-dbus-validate"));
     // Point D-Bus at a nonexistent socket so zbus doesn't auto-discover
     // the real session bus via /run/user/<uid>/bus.
-    cmd.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent-cloister-test")
-        .env_remove("XDG_RUNTIME_DIR");
+    cmd.env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        "unix:path=/nonexistent-cloister-test",
+    )
+    .env_remove("XDG_RUNTIME_DIR");
     cmd
 }
 

@@ -2,7 +2,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::unistd::pipe2;
 use wayrs_client::Connection;
 use wayrs_protocols::security_context_v1::*;
@@ -89,7 +89,7 @@ pub fn setup_context(socket_path: &str, engine: &str, app_id: &str) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use std::os::fd::AsRawFd;
 
     #[test]
