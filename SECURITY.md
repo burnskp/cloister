@@ -8,6 +8,18 @@ This policy covers security vulnerabilities in:
 - Seccomp filter generation (`cloister-seccomp-filter`)
 - Nix module logic that generates sandboxing configuration
 
+## Network Namespace Policy Notes
+
+`cloister-netns` enforces network policy with dedicated nftables tables per namespace.
+
+- `localhost` namespaces use DNAT from `veth-<name>` to `127.0.0.1` for configured `allowedPorts`.
+- `lan` namespaces restrict forwarded traffic to configured CIDR ranges and drop other namespace-originated traffic.
+- For `localhost` namespaces, `cloister-netns.firewall.autoOpenLocalhostPorts` controls both:
+  - auto-created NixOS firewall interface openings (`networking.firewall.interfaces."veth-<name>"`)
+  - localhost nft `input` accept rules for `allowedPorts`
+
+If `autoOpenLocalhostPorts = false`, localhost DNAT still exists but namespace-to-host traffic to those ports is blocked unless host firewall/nftables policy is configured separately.
+
 Out of scope:
 
 - Bugs in upstream dependencies (bubblewrap, xdg-dbus-proxy, WireGuard, nftables) — report those to the upstream projects directly.

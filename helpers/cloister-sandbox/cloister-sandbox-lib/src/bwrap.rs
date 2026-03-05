@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::Path;
 use std::process::Command;
 
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
@@ -76,6 +77,11 @@ pub fn build_bwrap_command(
         }
     }
 
+    // If /etc/netns/<ns>/hosts is missing, preserve host /etc/hosts as a
+    // fallback. The later static --ro-bind-try for /etc/netns/<ns>/hosts will
+    // override this when present.
+    args.extend(netns_hosts_fallback_args(config));
+
     // Static bwrap args (pre-computed by Nix: dirs, tmpfs, symlinks, store-path binds, env)
     args.extend(config.static_bwrap_args.iter().cloned());
 
@@ -136,6 +142,21 @@ pub fn build_bwrap_command(
     cmd.args(run_cmd);
 
     Ok((cmd, read_fd))
+}
+
+fn netns_hosts_fallback_args(config: &SandboxConfig) -> Vec<String> {
+    let Some(ns) = config.network_namespace.as_deref() else {
+        return Vec::new();
+    };
+    let hosts_path = format!("/etc/netns/{ns}/hosts");
+    if Path::new(&hosts_path).is_file() {
+        return Vec::new();
+    }
+    vec![
+        "--ro-bind".to_string(),
+        "/etc/hosts".to_string(),
+        "/etc/hosts".to_string(),
+    ]
 }
 
 /// Resolve $VAR references in a string using the runtime variable map.
@@ -290,6 +311,51 @@ mod tests {
             "git_path": "/nix/store/xxx-git/bin/git",
         });
         serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn netns_hosts_fallback_added_when_netns_hosts_missing() {
+        let mut config = minimal_config();
+        config.network_namespace = Some("cloister-missing-netns-hosts-test".to_string());
+        assert_eq!(
+            netns_hosts_fallback_args(&config),
+            vec!["--ro-bind", "/etc/hosts", "/etc/hosts"]
+        );
+    }
+
+    #[test]
+    fn netns_hosts_fallback_precedes_static_netns_hosts_bind_try() {
+        let mut config = minimal_config();
+        config.network_namespace = Some("cloister-missing-netns-hosts-test".to_string());
+        config.static_bwrap_args = vec![
+            "--ro-bind-try".to_string(),
+            "/etc/netns/cloister-missing-netns-hosts-test/hosts".to_string(),
+            "/etc/hosts".to_string(),
+        ];
+
+        let vars = HashMap::new();
+        let run_cmd = vec!["echo".to_string(), "hello".to_string()];
+        let (_cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let pipe_args = read_pipe_args(args_fd);
+
+        let fallback_pos = pipe_args
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/etc/hosts", "/etc/hosts"])
+            .expect("fallback /etc/hosts bind not found");
+        let try_pos = pipe_args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    "--ro-bind-try",
+                    "/etc/netns/cloister-missing-netns-hosts-test/hosts",
+                    "/etc/hosts",
+                ]
+            })
+            .expect("netns hosts --ro-bind-try not found");
+
+        assert!(fallback_pos < try_pos);
     }
 
     #[test]

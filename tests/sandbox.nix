@@ -1629,6 +1629,28 @@ in
     ];
   }) "test" ''"/etc/netns/vpn/resolv.conf","/etc/resolv.conf"'' true;
 
+  netns-hosts = mkConfigCheck "sandbox-netns-hosts" (evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.network.namespace = "vpn";
+        };
+      }
+    ];
+  }) "test" "/etc/netns/vpn/hosts" true;
+
+  netns-hosts-dest = mkConfigCheck "sandbox-netns-hosts-dest" (evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.network.namespace = "vpn";
+        };
+      }
+    ];
+  }) "test" ''"/etc/netns/vpn/hosts","/etc/hosts"'' true;
+
   no-netns-resolv-conf = mkConfigCheck "sandbox-no-netns-resolv-conf" (evalConfig {
     modules = [ baseModule ];
   }) "test" "/etc/netns" false;

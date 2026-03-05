@@ -42,7 +42,7 @@ Each entry in `cloister-netns.networks` becomes a systemd oneshot service (`cloi
 | Type | Connectivity | Use case |
 |------|-------------|----------|
 | `wireguard` | Full internet via VPN tunnel | Route all traffic through a VPN provider |
-| `localhost` | Host localhost ports only (DNAT) | Access local dev servers without internet |
+| `localhost` | Host localhost ports via `host.internal` (DNAT) | Access local dev servers without internet |
 | `lan` | LAN ranges only (configurable CIDRs) | Reach local network services, no internet |
 | `isolated` | Loopback only | Fully airgapped sandbox |
 
@@ -74,11 +74,21 @@ veth pair with DNAT to host ports:
 cloister-netns.networks.devports = {
   localhost = {
     allowedPorts = [ 8000 8080 8443 ];
-    hostAddress = "172.30.0.1/24";
-    namespaceAddress = "172.30.0.2/24";
   };
 };
 ```
+
+Inside the sandbox, access these ports as `host.internal:<port>` (for example, `curl host.internal:8080`). `127.0.0.1` remains namespace-local loopback and is not redirected to host services.
+If `/etc/netns/<name>/hosts` is missing, Cloister falls back to binding host `/etc/hosts` so basic hostname resolution still works.
+
+By default, `cloister-netns.firewall.autoOpenLocalhostPorts = true` does two things for localhost namespaces:
+
+- Adds host firewall interface openings on `veth-<name>` (`networking.firewall.interfaces`).
+- Adds matching accepts in the module's localhost nft `input` chain for `allowedPorts`.
+
+If you set `cloister-netns.firewall.autoOpenLocalhostPorts = false`, both of those auto-open behaviors are disabled. In that mode, localhost DNAT still exists, but namespace-to-host traffic for those ports is dropped unless you add your own host firewall/nftables rules.
+
+veth addresses are auto-assigned from `cloister-netns.addressPools` using sorted namespace index. Each namespace gets a `/30` block; host side uses `.1`, namespace side uses `.2`.
 
 ### LAN namespace
 
@@ -88,14 +98,25 @@ veth pair with forwarding to allowed CIDR ranges:
 cloister-netns.networks.lanonly = {
   lan = {
     allowedRanges = [ "10.0.0.0/8" "192.168.0.0/16" ];
-    hostAddress = "172.29.0.1/24";
-    namespaceAddress = "172.29.0.2/24";
   };
   dns.nameservers = [ "10.0.0.1" ];
 };
 ```
 
 > **Firewall:** LAN namespaces are firewalled. The namespace can only reach configured `allowedRanges` and cannot access host services directly. An `input` chain on the host drops unsolicited traffic from the namespace, and a `forward` chain restricts outbound destinations to allowed CIDRs. IP forwarding (`net.ipv4.ip_forward`) is enabled declaratively via `boot.kernel.sysctl` when any LAN namespace is configured.
+
+## Effective packet rules summary
+
+- `localhost` networks:
+- `prerouting` DNATs `veth-<name>` traffic on `allowedPorts` to `127.0.0.1`.
+- `forward` allows only `allowedPorts` from `veth-<name>`, then drops the rest.
+- `input` always allows established/related traffic and drops other traffic from `veth-<name>`.
+- When `autoOpenLocalhostPorts = true`, `input` also accepts new TCP/UDP traffic to `allowedPorts` from `veth-<name>`.
+- `lan` networks:
+- `forward` allows only destinations in `allowedRanges` from `veth-<name>`.
+- Return traffic to `veth-<name>` is allowed (established/related).
+- All other namespace-originated forwarding traffic is dropped.
+- `input` from `veth-<name>` is dropped except established/related packets.
 
 ### Isolated namespace
 
@@ -154,6 +175,9 @@ cloister-netns.networks.vpn = {
 | `cloister-netns.enable` | bool | `false` | Install the `cloister-netns` setcap helper |
 | `cloister-netns.allowedNamespaces` | listOf str | `[]` | Additional namespace names the helper may enter |
 | `cloister-netns.networks` | attrsOf submodule | `{}` | Declarative namespace definitions (auto-added to allowedNamespaces) |
+| `cloister-netns.addressPools.localhost` | str | `"172.30.0.0/16"` | CIDR pool used for localhost veth auto-assignment |
+| `cloister-netns.addressPools.lan` | str | `"172.29.0.0/16"` | CIDR pool used for LAN veth auto-assignment |
+| `cloister-netns.firewall.autoOpenLocalhostPorts` | bool | `true` | Auto-open host firewall ports for localhost namespaces on `veth-<name>` |
 | `cloister-netns.expectedNamespaces` | listOf str | `[]` | Asserted namespace names (populated from sandbox configs) |
 | `cloister-netns.enforceExecAllowlist` | bool | `true` | Restrict post-exec to `allowedExecPaths` only |
 | `cloister-netns.allowedExecPaths` | listOf str | `[cloister-sandbox]` | Executables the helper is allowed to exec |
@@ -191,16 +215,12 @@ cloister-netns.networks.vpn = {
 | Option | Type | Default | Purpose |
 |--------|------|---------|---------|
 | `allowedPorts` | listOf port | `[8000 8080 8443]` | Host ports accessible via DNAT |
-| `hostAddress` | str | `"172.30.0.1/24"` | Host-side veth address (CIDR) |
-| `namespaceAddress` | str | `"172.30.0.2/24"` | Namespace-side veth address (CIDR) |
 
 ### Per-network LAN options (`cloister-netns.networks.<name>.lan.*`)
 
 | Option | Type | Default | Purpose |
 |--------|------|---------|---------|
 | `allowedRanges` | listOf str | `["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"]` | CIDR ranges the namespace can reach (must be valid IPv4 CIDR notation, e.g. `10.0.0.0/8`) |
-| `hostAddress` | str | `"172.29.0.1/24"` | Host-side veth address (CIDR) |
-| `namespaceAddress` | str | `"172.29.0.2/24"` | Namespace-side veth address (CIDR) |
 
 ### Per-network isolated options (`cloister-netns.networks.<name>.isolated`)
 

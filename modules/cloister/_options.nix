@@ -1098,7 +1098,16 @@ let
                   src = "/etc/shells";
                   try = true;
                 }
-                { src = "/etc/hosts"; }
+                (
+                  if config.network.namespace != null then
+                    {
+                      src = "/etc/netns/${config.network.namespace}/hosts";
+                      dest = "/etc/hosts";
+                      try = true;
+                    }
+                  else
+                    { src = "/etc/hosts"; }
+                )
                 (
                   if config.network.namespace != null then
                     {

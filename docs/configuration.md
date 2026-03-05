@@ -323,6 +323,8 @@ This requires the `cloister-netns` NixOS module on the host system:
 ```
 
 For full details (declarative namespace types, WireGuard and LAN examples, file-based secret options, and all `cloister-netns.*` options), see [Network Namespaces](network-namespace.md).
+For veth-based namespace types (`localhost`, `lan`), addresses are auto-assigned from host-level pools (`cloister-netns.addressPools.localhost` and `cloister-netns.addressPools.lan`).
+For localhost namespaces, `cloister-netns.firewall.autoOpenLocalhostPorts = true` (default) auto-opens host firewall ports on `veth-<name>` and adds matching accepts in cloister-netns localhost nft `input` rules. Setting it to `false` disables both auto-open paths.
 
 ### Git configuration
 
@@ -644,7 +646,7 @@ See the sections above for usage examples and explanations.
 | `shell.customRcPath.profile` | nullOr path | `null` | Custom profile file to source inside the sandbox |
 | `validators.enable` | bool | `false` | Install cloister validator helpers and wrap them outside |
 | `network.enable` | bool | `true` | Share host network namespace |
-| `network.namespace` | nullOr str | `null` | Linux network namespace to join |
+| `network.namespace` | nullOr str | `null` | Linux network namespace to join (localhost-netns host services are reachable as `host.internal:<port>`) |
 | `sandbox.bindWorkingDirectory` | bool | `true` | Bind-mount the working directory (git root or CWD) into the sandbox. Disable for app-specific sandboxes |
 | `sandbox.env` | attrsOf str | *(base vars)* | Environment variables inside sandbox |
 | `sandbox.passthroughEnv` | list of str | *(locale vars)* | Host env vars to pass through when set |

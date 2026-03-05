@@ -6,10 +6,10 @@ let
   # Returns the full config attrset.
   evalNetns =
     modules:
-    (lib.evalModules {
+    (import "${pkgs.path}/nixos/lib/eval-config.nix" {
+      inherit (pkgs) system;
       modules = [
         ../modules/cloister-netns
-        { _module.args = { inherit pkgs; }; }
       ]
       ++ modules;
     }).config;
@@ -41,23 +41,122 @@ let
       mkCheck name hasExpected;
 in
 {
-  # ── Duplicate host address assertion ──────────────────────────────────
+  # ── Firewall integration for localhost namespaces ────────────────────
 
-  duplicate-host-addr = mkNetnsAssertionCheck "netns-duplicate-host-addr" [
+  localhost-firewall-auto-open = mkCheck "netns-localhost-firewall-auto-open" (
+    let
+      config = evalNetns [
+        {
+          cloister-netns = {
+            enable = true;
+            networks.local.localhost.allowedPorts = [
+              3000
+              8080
+            ];
+          };
+        }
+      ];
+      iface = config.networking.firewall.interfaces."veth-local";
+    in
+    iface.allowedTCPPorts == [
+      3000
+      8080
+    ]
+    &&
+      iface.allowedUDPPorts == [
+        3000
+        8080
+      ]
+  );
+
+  localhost-firewall-auto-open-disabled = mkCheck "netns-localhost-firewall-auto-open-disabled" (
+    let
+      config = evalNetns [
+        {
+          cloister-netns = {
+            enable = true;
+            firewall.autoOpenLocalhostPorts = false;
+            networks.local.localhost.allowedPorts = [
+              3000
+              8080
+            ];
+          };
+        }
+      ];
+    in
+    !(config.networking.firewall.interfaces ? "veth-local")
+  );
+
+  # ── Auto address allocation should avoid collisions ──────────────────
+
+  auto-addresses-no-duplicates = mkCheck "netns-auto-addresses-no-duplicates" (
+    let
+      result = builtins.tryEval (evalNetns [
+        {
+          cloister-netns = {
+            enable = true;
+            networks = {
+              dev.localhost = { };
+              docs.localhost = { };
+              lan1.lan = { };
+              lan2.lan = { };
+            };
+          };
+        }
+      ]);
+    in
+    result.success
+  );
+
+  # ── Pool validation assertions ────────────────────────────────────────
+
+  invalid-localhost-pool = mkNetnsAssertionCheck "netns-invalid-localhost-pool" [
     {
       cloister-netns = {
         enable = true;
-        networks.a.localhost = {
-          hostAddress = "172.30.0.1/24";
-          namespaceAddress = "172.30.0.2/24";
-        };
-        networks.b.localhost = {
-          hostAddress = "172.30.0.1/24";
-          namespaceAddress = "172.30.0.3/24";
+        addressPools.localhost = "not-a-cidr";
+        networks.dev.localhost = { };
+      };
+    }
+  ] "addressPools.localhost";
+
+  invalid-lan-pool = mkNetnsAssertionCheck "netns-invalid-lan-pool" [
+    {
+      cloister-netns = {
+        enable = true;
+        addressPools.lan = "invalid";
+        networks.dev.lan = { };
+      };
+    }
+  ] "addressPools.lan";
+
+  # ── Pool capacity assertions ──────────────────────────────────────────
+
+  localhost-pool-exhausted = mkNetnsAssertionCheck "netns-localhost-pool-exhausted" [
+    {
+      cloister-netns = {
+        enable = true;
+        addressPools.localhost = "172.30.0.0/30";
+        networks = {
+          one.localhost = { };
+          two.localhost = { };
         };
       };
     }
-  ] "duplicate host addresses";
+  ] "localhost address pool exhausted";
+
+  lan-pool-exhausted = mkNetnsAssertionCheck "netns-lan-pool-exhausted" [
+    {
+      cloister-netns = {
+        enable = true;
+        addressPools.lan = "172.29.0.0/30";
+        networks = {
+          one.lan = { };
+          two.lan = { };
+        };
+      };
+    }
+  ] "lan address pool exhausted";
 
   # ── Interface name length > 15 assertion ──────────────────────────────
 

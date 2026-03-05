@@ -91,16 +91,6 @@ let
         ];
         description = "Host ports accessible from the namespace via DNAT.";
       };
-      hostAddress = lib.mkOption {
-        type = lib.types.str;
-        default = "172.30.0.1/24";
-        description = "Address assigned to the host end of the veth pair (CIDR).";
-      };
-      namespaceAddress = lib.mkOption {
-        type = lib.types.str;
-        default = "172.30.0.2/24";
-        description = "Address assigned to the namespace end of the veth pair (CIDR).";
-      };
     };
   };
 
@@ -114,16 +104,6 @@ let
           "192.168.0.0/16"
         ];
         description = "CIDR ranges the namespace is allowed to reach (forwarded through nftables).";
-      };
-      hostAddress = lib.mkOption {
-        type = lib.types.str;
-        default = "172.29.0.1/24";
-        description = "Address assigned to the host end of the veth pair (CIDR).";
-      };
-      namespaceAddress = lib.mkOption {
-        type = lib.types.str;
-        default = "172.29.0.2/24";
-        description = "Address assigned to the namespace end of the veth pair (CIDR).";
       };
     };
   };
@@ -171,6 +151,61 @@ let
     };
   };
 
+  # ── Address allocation helpers ────────────────────────────────────────
+
+  cidrPattern = "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])/(3[0-2]|[12][0-9]|[0-9])$";
+  intMod = x: y: x - (builtins.div x y) * y;
+  pow2 = n: if n == 0 then 1 else 2 * pow2 (n - 1);
+
+  ipToInt = octets: lib.foldl' (acc: oct: acc * 256 + oct) 0 octets;
+
+  intToIp =
+    ipInt:
+    let
+      o1 = builtins.div ipInt 16777216;
+      r1 = intMod ipInt 16777216;
+      o2 = builtins.div r1 65536;
+      r2 = intMod r1 65536;
+      o3 = builtins.div r2 256;
+      o4 = intMod r2 256;
+    in
+    "${toString o1}.${toString o2}.${toString o3}.${toString o4}";
+
+  parsePool =
+    cidr:
+    if builtins.match cidrPattern cidr == null then
+      null
+    else
+      let
+        parts = lib.splitString "/" cidr;
+        ip = builtins.elemAt parts 0;
+        prefix = builtins.fromJSON (builtins.elemAt parts 1);
+        octets = map builtins.fromJSON (lib.splitString "." ip);
+        subnetSize = pow2 (32 - prefix);
+        ipInt = ipToInt octets;
+        networkInt = ipInt - intMod ipInt subnetSize;
+      in
+      {
+        inherit prefix networkInt;
+        slotCount = builtins.div subnetSize 4;
+      };
+
+  pairForIndex =
+    pool: idx:
+    if pool == null || idx >= pool.slotCount then
+      {
+        hostAddress = "0.0.0.1/30";
+        namespaceAddress = "0.0.0.2/30";
+      }
+    else
+      let
+        blockBase = pool.networkInt + idx * 4;
+      in
+      {
+        hostAddress = "${intToIp (blockBase + 1)}/30";
+        namespaceAddress = "${intToIp (blockBase + 2)}/30";
+      };
+
   # ── Service generators ────────────────────────────────────────────────
 
   mkResolvConf =
@@ -205,6 +240,25 @@ let
         } > /etc/netns/${escapedName}/resolv.conf
         chmod 0644 /etc/netns/${escapedName}/resolv.conf
       '';
+
+  mkHostsFile =
+    name: hostInternalIp:
+    let
+      escapedName = lib.escapeShellArg name;
+    in
+    ''
+      install -d -m 0711 /etc/netns
+      install -d -m 0711 /etc/netns/${escapedName}
+      if [[ -f /etc/hosts ]]; then
+        cp /etc/hosts /etc/netns/${escapedName}/hosts
+      else
+        : > /etc/netns/${escapedName}/hosts
+      fi
+      ${lib.optionalString (hostInternalIp != null) ''
+        echo "${hostInternalIp} host.internal" >> /etc/netns/${escapedName}/hosts
+      ''}
+      chmod 0644 /etc/netns/${escapedName}/hosts
+    '';
 
   mkNetnsStopScript =
     name: extraCmds:
@@ -342,6 +396,7 @@ let
           ip -n ${escapedName} route add default dev ${escapedIfName}
           ${ipv6RouteCmds}
           ${mkResolvConf name netCfg.dns}
+          ${mkHostsFile name null}
         '';
         ExecStop = stopScript;
       };
@@ -356,6 +411,7 @@ let
       namespaceAddress,
       nftRules,
       sysctlKey,
+      hostInternalIp ? null,
     }:
     let
       escapedName = lib.escapeShellArg name;
@@ -399,6 +455,7 @@ let
           sysctl -w net.ipv4.conf.${escapedVethHost}.${sysctlKey}=1
           nft -f ${nftRulesFile}
           ${mkResolvConf name netCfg.dns}
+          ${mkHostsFile name hostInternalIp}
         '';
         ExecStop = stopScript;
       };
@@ -416,6 +473,7 @@ let
       typeName = "localhost";
       inherit (localhost) hostAddress namespaceAddress;
       sysctlKey = "route_localnet";
+      hostInternalIp = builtins.head (lib.splitString "/" localhost.hostAddress);
       nftRules = ''
         table ip cloister-netns-${name} {
           chain prerouting {
@@ -433,6 +491,10 @@ let
           chain input {
             type filter hook input priority filter; policy accept;
             iifname "${vethHost}" ct state established,related accept
+            ${lib.optionalString cfg.firewall.autoOpenLocalhostPorts ''
+              iifname "${vethHost}" tcp dport { ${portList} } accept
+              iifname "${vethHost}" udp dport { ${portList} } accept
+            ''}
             iifname "${vethHost}" drop
           }
         }
@@ -494,6 +556,7 @@ let
           set -euo pipefail
           ip netns add ${escapedName}
           ip -n ${escapedName} link set lo up
+          ${mkHostsFile name null}
         '';
         ExecStop = stopScript;
       };
@@ -506,21 +569,65 @@ let
   lanNets = lib.filterAttrs (_: net: net.lan != null) cfg.networks;
   isolatedNets = lib.filterAttrs (_: net: net.isolated) cfg.networks;
 
+  localhostNames = lib.sort builtins.lessThan (lib.attrNames localhostNets);
+  lanNames = lib.sort builtins.lessThan (lib.attrNames lanNets);
+
+  localhostPool = parsePool cfg.addressPools.localhost;
+  lanPool = parsePool cfg.addressPools.lan;
+
+  effectiveLocalhostAddressPairs = builtins.listToAttrs (
+    lib.imap0 (idx: name: {
+      inherit name;
+      value = pairForIndex localhostPool idx;
+    }) localhostNames
+  );
+
+  effectiveLanAddressPairs = builtins.listToAttrs (
+    lib.imap0 (idx: name: {
+      inherit name;
+      value = pairForIndex lanPool idx;
+    }) lanNames
+  );
+
   wireguardServices = lib.mapAttrs' (
     name: net: lib.nameValuePair "cloister-netns-${name}" (mkWireguardService name net)
   ) wireguardNets;
 
   localhostServices = lib.mapAttrs' (
-    name: net: lib.nameValuePair "cloister-netns-${name}" (mkLocalhostService name net)
+    name: net:
+    lib.nameValuePair "cloister-netns-${name}" (
+      mkLocalhostService name (
+        net
+        // {
+          localhost = net.localhost // effectiveLocalhostAddressPairs.${name};
+        }
+      )
+    )
   ) localhostNets;
 
   lanServices = lib.mapAttrs' (
-    name: net: lib.nameValuePair "cloister-netns-${name}" (mkLanService name net)
+    name: net:
+    lib.nameValuePair "cloister-netns-${name}" (
+      mkLanService name (
+        net
+        // {
+          lan = net.lan // effectiveLanAddressPairs.${name};
+        }
+      )
+    )
   ) lanNets;
 
   isolatedServices = lib.mapAttrs' (
     name: _: lib.nameValuePair "cloister-netns-${name}" (mkIsolatedService name)
   ) isolatedNets;
+
+  localhostFirewallInterfaces = lib.mapAttrs' (
+    name: net:
+    lib.nameValuePair "veth-${name}" {
+      allowedTCPPorts = lib.mkDefault net.localhost.allowedPorts;
+      allowedUDPPorts = lib.mkDefault net.localhost.allowedPorts;
+    }
+  ) localhostNets;
 
   # ── Assertion helpers ─────────────────────────────────────────────────
 
@@ -538,7 +645,6 @@ let
           hasLan
           hasIsolated
         ];
-        cidrPattern = "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])/(3[0-2]|[12][0-9]|[0-9])$";
         cidrV6Pattern = "^[0-9a-fA-F:]+/[0-9]{1,3}$";
         isCidr = addr: builtins.match cidrPattern addr != null || builtins.match cidrV6Pattern addr != null;
         ipv4Pattern = "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])$";
@@ -619,29 +725,11 @@ let
           message = "cloister-netns.networks.${name}: veth interface name 'veth-${name}-ns' exceeds 15 character Linux limit.";
         }
       ]
-      ++ lib.optionals hasLocalhost [
-        {
-          assertion = builtins.match cidrPattern net.localhost.hostAddress != null;
-          message = "cloister-netns.networks.${name}: localhost.hostAddress '${net.localhost.hostAddress}' is not valid CIDR notation. Expected format: a.b.c.d/prefix (e.g. 172.30.0.1/24).";
-        }
-        {
-          assertion = builtins.match cidrPattern net.localhost.namespaceAddress != null;
-          message = "cloister-netns.networks.${name}: localhost.namespaceAddress '${net.localhost.namespaceAddress}' is not valid CIDR notation. Expected format: a.b.c.d/prefix (e.g. 172.30.0.2/24).";
-        }
-      ]
       ++ lib.optionals hasLan (
         let
           invalidRanges = builtins.filter (r: builtins.match cidrPattern r == null) net.lan.allowedRanges;
         in
         [
-          {
-            assertion = builtins.match cidrPattern net.lan.hostAddress != null;
-            message = "cloister-netns.networks.${name}: lan.hostAddress '${net.lan.hostAddress}' is not valid CIDR notation. Expected format: a.b.c.d/prefix (e.g. 172.29.0.1/24).";
-          }
-          {
-            assertion = builtins.match cidrPattern net.lan.namespaceAddress != null;
-            message = "cloister-netns.networks.${name}: lan.namespaceAddress '${net.lan.namespaceAddress}' is not valid CIDR notation. Expected format: a.b.c.d/prefix (e.g. 172.29.0.2/24).";
-          }
           {
             assertion = builtins.length net.lan.allowedRanges > 0;
             message = "cloister-netns.networks.${name}: lan.allowedRanges must be non-empty.";
@@ -663,13 +751,13 @@ let
 
   allVethAddresses =
     let
-      localhostPairs = lib.mapAttrsToList (name: net: {
+      localhostPairs = lib.mapAttrsToList (name: _: {
         inherit name;
-        inherit (net.localhost) hostAddress namespaceAddress;
+        inherit (effectiveLocalhostAddressPairs.${name}) hostAddress namespaceAddress;
       }) localhostNets;
-      lanPairs = lib.mapAttrsToList (name: net: {
+      lanPairs = lib.mapAttrsToList (name: _: {
         inherit name;
-        inherit (net.lan) hostAddress namespaceAddress;
+        inherit (effectiveLanAddressPairs.${name}) hostAddress namespaceAddress;
       }) lanNets;
     in
     localhostPairs ++ lanPairs;
@@ -709,6 +797,43 @@ in
 
         Each network must configure exactly one of `wireguard`, `localhost`, `lan`, or `isolated`.
       '';
+    };
+
+    addressPools = lib.mkOption {
+      type = lib.types.submodule {
+        options = {
+          localhost = lib.mkOption {
+            type = lib.types.str;
+            default = "172.30.0.0/16";
+            description = "CIDR pool for auto-assigning localhost veth addresses (/30 blocks by sorted namespace index).";
+          };
+          lan = lib.mkOption {
+            type = lib.types.str;
+            default = "172.29.0.0/16";
+            description = "CIDR pool for auto-assigning LAN veth addresses (/30 blocks by sorted namespace index).";
+          };
+        };
+      };
+      default = { };
+      description = "Address pools used for deterministic index-based veth auto-assignment.";
+    };
+
+    firewall = lib.mkOption {
+      type = lib.types.submodule {
+        options = {
+          autoOpenLocalhostPorts = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = ''
+              Automatically allow localhost allowedPorts from veth-<name>:
+              adds per-interface host firewall openings and matching accepts in
+              cloister-netns localhost nft input rules.
+            '';
+          };
+        };
+      };
+      default = { };
+      description = "Host firewall integration for cloister-netns managed networks.";
     };
 
     expectedNamespaces = lib.mkOption {
@@ -753,6 +878,30 @@ in
         assertion = expectedNsNotFound == [ ];
         message = "cloister-netns: expectedNamespaces contains names not in networks or allowedNamespaces: ${lib.concatStringsSep ", " expectedNsNotFound}";
       }
+      {
+        assertion = localhostPool != null;
+        message = "cloister-netns.addressPools.localhost must be valid IPv4 CIDR notation (e.g. 172.30.0.0/16).";
+      }
+      {
+        assertion = lanPool != null;
+        message = "cloister-netns.addressPools.lan must be valid IPv4 CIDR notation (e.g. 172.29.0.0/16).";
+      }
+      {
+        assertion = localhostPool == null || localhostPool.prefix <= 30;
+        message = "cloister-netns.addressPools.localhost prefix must be <= 30 to allocate /30 pairs.";
+      }
+      {
+        assertion = lanPool == null || lanPool.prefix <= 30;
+        message = "cloister-netns.addressPools.lan prefix must be <= 30 to allocate /30 pairs.";
+      }
+      {
+        assertion = localhostPool == null || builtins.length localhostNames <= localhostPool.slotCount;
+        message = "cloister-netns: localhost address pool exhausted for configured namespaces.";
+      }
+      {
+        assertion = lanPool == null || builtins.length lanNames <= lanPool.slotCount;
+        message = "cloister-netns: lan address pool exhausted for configured namespaces.";
+      }
     ]
     ++ networkAssertions
     ++ [
@@ -789,6 +938,8 @@ in
     };
 
     boot.kernel.sysctl = lib.mkIf (lanNets != { }) { "net.ipv4.ip_forward" = 1; };
+
+    networking.firewall.interfaces = lib.mkIf cfg.firewall.autoOpenLocalhostPorts localhostFirewallInterfaces;
 
     systemd.services = wireguardServices // localhostServices // lanServices // isolatedServices;
   };
