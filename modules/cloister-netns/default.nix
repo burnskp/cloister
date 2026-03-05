@@ -312,6 +312,7 @@ let
       mtuCmd = lib.optionalString (
         wg.mtu != null
       ) "ip -n ${escapedName} link set ${escapedIfName} mtu ${toString wg.mtu}";
+      stopScript = mkNetnsStopScript name "";
     in
     {
       description = "Cloister WireGuard namespace: ${name}";
@@ -326,6 +327,7 @@ let
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        ExecStartPre = "-${stopScript}";
         ExecStart = pkgs.writeShellScript "cloister-netns-${name}-start" ''
           set -euo pipefail
           ip netns add ${escapedName}
@@ -341,7 +343,7 @@ let
           ${ipv6RouteCmds}
           ${mkResolvConf name netCfg.dns}
         '';
-        ExecStop = mkNetnsStopScript name "";
+        ExecStop = stopScript;
       };
     };
 
@@ -363,6 +365,10 @@ let
       escapedVethNs = lib.escapeShellArg vethNs;
       hostIp = builtins.head (lib.splitString "/" hostAddress);
       nftRulesFile = pkgs.writeText "cloister-netns-${name}-nft" nftRules;
+      stopScript = mkNetnsStopScript name ''
+        nft delete table ip cloister-netns-${escapedName} || true
+        sysctl -w net.ipv4.conf.${escapedVethHost}.${sysctlKey}=0 || true
+      '';
     in
     {
       description = "Cloister ${typeName} namespace: ${name}";
@@ -378,6 +384,7 @@ let
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        ExecStartPre = "-${stopScript}";
         ExecStart = pkgs.writeShellScript "cloister-netns-${name}-start" ''
           set -euo pipefail
           ip netns add ${escapedName}
@@ -393,10 +400,7 @@ let
           nft -f ${nftRulesFile}
           ${mkResolvConf name netCfg.dns}
         '';
-        ExecStop = mkNetnsStopScript name ''
-          nft delete table ip cloister-netns-${escapedName} || true
-          sysctl -w net.ipv4.conf.${escapedVethHost}.${sysctlKey}=0 || true
-        '';
+        ExecStop = stopScript;
       };
     };
 
@@ -473,6 +477,7 @@ let
     name:
     let
       escapedName = lib.escapeShellArg name;
+      stopScript = mkNetnsStopScript name "";
     in
     {
       description = "Cloister isolated namespace: ${name}";
@@ -484,12 +489,13 @@ let
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        ExecStartPre = "-${stopScript}";
         ExecStart = pkgs.writeShellScript "cloister-netns-${name}-start" ''
           set -euo pipefail
           ip netns add ${escapedName}
           ip -n ${escapedName} link set lo up
         '';
-        ExecStop = mkNetnsStopScript name "";
+        ExecStop = stopScript;
       };
     };
 
