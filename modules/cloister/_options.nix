@@ -631,6 +631,21 @@ let
             '';
           };
 
+          fonts = {
+            packages = lib.mkOption {
+              type = lib.types.listOf lib.types.package;
+              default = [ ];
+              description = ''
+                Font packages available inside the sandbox. A fontconfig configuration
+                is generated automatically from this list and set via FONTCONFIG_FILE,
+                replacing the host /etc/fonts dependency.
+
+                When GUI is enabled this defaults to [ pkgs.dejavu_fonts ].
+                Set to [ ] to disable the generated fontconfig entirely.
+              '';
+            };
+          };
+
           gpu = {
             enable = lib.mkOption {
               type = lib.types.bool;
@@ -1169,6 +1184,13 @@ let
               pkgs.gtk3
               pkgs.gtk4
               pkgs.gsettings-desktop-schemas
+            ]
+          );
+
+          # Default font packages for GUI sandboxes
+          fonts.packages = lib.mkDefault (
+            lib.optionals (config.gui.wayland.enable || config.gui.x11.enable) [
+              pkgs.dejavu_fonts
             ]
           );
         };

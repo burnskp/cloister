@@ -336,13 +336,7 @@ let
         }
       ];
 
-      guiBinds = lib.optionals guiEnabled [
-        {
-          src = "/etc/fonts";
-          dest = null;
-          try = true;
-        }
-      ];
+      guiBinds = [ ];
 
       shellConfigBinds = lib.optionals sCfg.shell.hostConfig (
         map (b: {
@@ -439,6 +433,11 @@ let
             QT_SCALE_FACTOR = toString sCfg.gui.scaleFactor;
           }
         )
+        // lib.optionalAttrs (sCfg.gui.fonts.packages != [ ]) {
+          FONTCONFIG_FILE = pkgs.makeFontsConf {
+            fontDirectories = sCfg.gui.fonts.packages;
+          };
+        }
       );
 
       # --- Duplicate bind destination detection ---

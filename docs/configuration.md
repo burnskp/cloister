@@ -469,6 +469,32 @@ cloister.sandboxes.geeqie.gui.dataPackages = with pkgs; [
 
 `XDG_DATA_DIRS` cannot be set directly via `sandbox.env` when GUI is enabled - use `gui.dataPackages` instead.
 
+### Fonts
+
+```nix
+cloister.sandboxes.dev.gui.fonts.packages = with pkgs; [ dejavu_fonts ];  # default when GUI is enabled
+```
+
+When a GUI display protocol is enabled, a self-contained fontconfig configuration is generated via `pkgs.makeFontsConf` and injected into the sandbox as `FONTCONFIG_FILE`. This replaces the previous host `/etc/fonts` bind mount, making font rendering a declared sandbox property instead of a host-dependent side-effect.
+
+The default provides **`dejavu_fonts`** - a widely-compatible font family covering Latin, Greek, Cyrillic, and more. To add additional fonts:
+
+```nix
+cloister.sandboxes.myapp.gui.fonts.packages = with pkgs; [
+  dejavu_fonts
+  noto-fonts
+  noto-fonts-cjk-sans
+];
+```
+
+Set to an empty list to disable the generated fontconfig entirely (e.g., if the application bundles its own fonts):
+
+```nix
+cloister.sandboxes.myapp.gui.fonts.packages = lib.mkForce [ ];
+```
+
+`FONTCONFIG_FILE` cannot be set directly via `sandbox.env` when GUI is enabled - use `gui.fonts.packages` instead.
+
 ### Desktop entries
 
 ```nix
@@ -652,6 +678,7 @@ See the sections above for usage examples and explanations.
 | `gui.gpu.shm` | bool | `true` | Mount a private tmpfs at /dev/shm when GPU is enabled (does not expose host shared memory) |
 | `gui.scaleFactor` | nullOr float | `null` | Display scale factor for HiDPI (sets `GDK_SCALE`, `GDK_DPI_SCALE`, `QT_SCALE_FACTOR`) |
 | `gui.dataPackages` | list of package | `[hicolor-icon-theme]`* | Packages whose `/share` dirs form `XDG_DATA_DIRS` (*`gtk3`/`gtk4`/`gsettings-desktop-schemas` added when `gui.gtk.enable`) |
+| `gui.fonts.packages` | list of package | `[]`* | Font packages for fontconfig (*`dejavu_fonts` added when Wayland/X11 enabled) |
 | `gui.gtk.enable` | bool | `false`* | Enable GTK theming (*auto-enabled with Wayland/X11) |
 | `gui.gtk.theme` | str | `"Adwaita"` | GTK theme name (sets `GTK_THEME` env var) |
 | `gui.gtk.packages` | list of package | `[]` | Additional GTK theme packages merged into `XDG_DATA_DIRS` |

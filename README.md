@@ -171,6 +171,7 @@ All per-sandbox options live under `cloister.sandboxes.<name>.*`. See [Configura
 | | `gui.qt.enable` | bool | `false` | Qt theming |
 | | `gui.desktopEntry.enable` | bool | `false` | Generate .desktop file |
 | | `gui.dataPackages` | list of package | `[hicolor-icon-theme]`* | XDG_DATA_DIRS packages |
+| | `gui.fonts.packages` | list of package | `[]`* | Font packages for fontconfig (*`dejavu_fonts` with GUI) |
 | **Audio** | `audio.pulseaudio.enable` | bool | `false` | Forward PulseAudio socket |
 | | `audio.pipewire.enable` | bool | `false` | Forward PipeWire socket |
 | **Hardware** | `video.enable` | bool | `false` | Bind webcam/camera devices |

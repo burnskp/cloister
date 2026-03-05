@@ -2241,4 +2241,79 @@ in
     }
   ] "scaleFactor must be a positive value";
 
+  # ── Fontconfig tests ──────────────────────────────────────────────
+
+  fontconfig-present-with-gui = mkConfigCheck "sandbox-fontconfig-present-with-gui" (evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.gui.wayland = {
+            enable = true;
+            securityContext.enable = false;
+          };
+        };
+      }
+    ];
+  }) "test" "FONTCONFIG_FILE" true;
+
+  fontconfig-absent-without-gui = mkConfigCheck "sandbox-fontconfig-absent-without-gui" (evalConfig {
+    modules = [ baseModule ];
+  }) "test" "FONTCONFIG_FILE" false;
+
+  fontconfig-absent-empty-packages = mkConfigCheck "sandbox-fontconfig-absent-empty-packages" (
+    evalConfig
+    {
+      modules = [
+        {
+          cloister = {
+            enable = true;
+            sandboxes.test = {
+              gui.wayland = {
+                enable = true;
+                securityContext.enable = false;
+              };
+              gui.fonts.packages = lib.mkForce [ ];
+            };
+          };
+        }
+      ];
+    }
+  ) "test" "FONTCONFIG_FILE" false;
+
+  fontconfig-custom-packages = mkConfigCheck "sandbox-fontconfig-custom-packages" (evalConfig {
+    modules = [
+      (
+        { pkgs, ... }:
+        {
+          cloister = {
+            enable = true;
+            sandboxes.test = {
+              gui.wayland = {
+                enable = true;
+                securityContext.enable = false;
+              };
+              gui.fonts.packages = lib.mkForce [ pkgs.noto-fonts ];
+            };
+          };
+        }
+      )
+    ];
+  }) "test" "FONTCONFIG_FILE" true;
+
+  gui-env-override-fontconfig = mkAssertionCheck "sandbox-gui-env-override-fontconfig" [
+    {
+      cloister = {
+        enable = true;
+        sandboxes.test = {
+          gui.wayland = {
+            enable = true;
+            securityContext.enable = false;
+          };
+          sandbox.env.FONTCONFIG_FILE = lib.mkForce "/bad/fonts.conf";
+        };
+      };
+    }
+  ] "managed by gui";
+
 }
