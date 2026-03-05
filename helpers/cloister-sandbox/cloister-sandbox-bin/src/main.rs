@@ -1,7 +1,8 @@
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{self, ExitStatus};
-use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 
 use cloister_sandbox_lib::bwrap;
 use cloister_sandbox_lib::config::SandboxConfig;
@@ -22,6 +23,11 @@ static SIGINT_COUNT: AtomicI32 = AtomicI32::new(0);
 
 /// Monotonic timestamp (seconds) of the last SIGINT, for escalation windowing.
 static LAST_SIGINT_SEC: AtomicI64 = AtomicI64::new(0);
+
+/// Whether the sandbox is running an interactive shell (no `--new-session`).
+/// When true, the shell receives SIGINT directly from the terminal, so we
+/// must not forward the first Ctrl-C ourselves.
+static INTERACTIVE_MODE: AtomicBool = AtomicBool::new(false);
 
 /// If consecutive Ctrl-C presses are more than this many seconds apart, the
 /// escalation counter resets and the next press is treated as a fresh first press.
@@ -52,9 +58,13 @@ fn monotonic_seconds() -> i64 {
 
 /// Signal handler that forwards signals to the child process with escalation.
 ///
-/// - **SIGINT**: Rapid consecutive presses escalate: SIGINT → SIGTERM → SIGKILL.
-///   Presses spaced more than [`SIGINT_ESCALATION_WINDOW_SECS`] apart reset the counter,
-///   so normal interactive Ctrl-C usage (e.g. cancelling a shell command) is unaffected.
+/// - **SIGINT (non-interactive)**: Rapid consecutive presses escalate:
+///   SIGINT → SIGTERM → SIGKILL. Presses spaced more than
+///   [`SIGINT_ESCALATION_WINDOW_SECS`] apart reset the counter, so normal
+///   interactive Ctrl-C usage (e.g. cancelling a shell command) is unaffected.
+/// - **SIGINT (interactive)**: The first press is **not forwarded** because the
+///   shell already receives SIGINT directly from the terminal (no `--new-session`).
+///   The 2nd and 3rd rapid presses still escalate to SIGTERM / SIGKILL.
 /// - **SIGTERM**: Forwarded to the child; a [`SIGTERM_GRACE_SECS`] alarm is set to
 ///   send SIGKILL if the child hasn't exited by then.
 /// - **SIGALRM**: Sends SIGKILL to the child (grace period expired).
@@ -79,9 +89,14 @@ extern "C" fn forward_signal(sig: libc::c_int) {
             };
 
             match count {
-                1 => unsafe {
-                    libc::kill(pid, libc::SIGINT);
-                },
+                1 => {
+                    if !INTERACTIVE_MODE.load(Ordering::Acquire) {
+                        unsafe {
+                            libc::kill(pid, libc::SIGINT);
+                        }
+                    }
+                    // In interactive mode the shell gets SIGINT from the terminal directly.
+                }
                 2 => {
                     signal_write_stderr(
                         b"\ncloister-sandbox: requesting sandbox shutdown (Ctrl-C again to force)...\n",
@@ -131,9 +146,14 @@ fn install_signal_handlers() {
 /// Spawn a child process and wait for it, storing its PID so signal handlers
 /// can forward signals to it.
 ///
+/// When `interactive` is true, a `pre_exec` hook is installed that:
+/// 1. Sets SIGINT to `SIG_IGN` so the bwrap outer process ignores Ctrl-C
+///    (the shell inside handles it via the terminal).
+/// 2. Resets the signal mask to empty so the child starts with clean signals.
+///
 /// Blocks SIGTERM/SIGINT/SIGHUP/SIGALRM around the spawn→store window to
 /// prevent signals from being dropped when CHILD_PID is still 0.
-fn spawn_and_wait(cmd: &mut process::Command) -> io::Result<ExitStatus> {
+fn spawn_and_wait(cmd: &mut process::Command, interactive: bool) -> io::Result<ExitStatus> {
     // Reset escalation state for new child
     SIGINT_COUNT.store(0, Ordering::Release);
     LAST_SIGINT_SEC.store(0, Ordering::Release);
@@ -148,6 +168,24 @@ fn spawn_and_wait(cmd: &mut process::Command) -> io::Result<ExitStatus> {
         libc::sigaddset(&mut block_set, libc::SIGHUP);
         libc::sigaddset(&mut block_set, libc::SIGALRM);
         libc::sigprocmask(libc::SIG_BLOCK, &block_set, &mut old_set);
+    }
+
+    if interactive {
+        // Safety: only calls async-signal-safe functions (sigaction, sigemptyset,
+        // sigprocmask). Runs between fork and exec in the child process.
+        unsafe {
+            cmd.pre_exec(|| {
+                // Ignore SIGINT in bwrap's outer process so Ctrl-C doesn't kill it.
+                libc::signal(libc::SIGINT, libc::SIG_IGN);
+
+                // Reset signal mask so the shell starts with no blocked signals.
+                let mut empty_set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut empty_set);
+                libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
+
+                Ok(())
+            });
+        }
     }
 
     let mut child = match cmd.spawn() {
@@ -232,7 +270,7 @@ fn run() -> i32 {
             cmd.args(["--after-netns", "--config", &config_path]);
             cmd.args(&sandbox_args);
 
-            let status = spawn_and_wait(&mut cmd).unwrap_or_else(|e| {
+            let status = spawn_and_wait(&mut cmd, false).unwrap_or_else(|e| {
                 eprintln!("{prefix}: exec netns helper: {e}");
                 process::exit(127);
             });
@@ -635,12 +673,16 @@ fn run() -> i32 {
     );
 
     // --- 11. Spawn bwrap ---
+    let is_interactive = env::is_interactive(&command_args, config.default_command.as_deref());
+    INTERACTIVE_MODE.store(is_interactive, Ordering::Release);
+
     let (mut cmd, _args_fd) = match bwrap::build_bwrap_command(
         &config,
         &runtime_vars,
         extra_args,
         &run_cmd,
         &effective_start_dir,
+        is_interactive,
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -656,7 +698,7 @@ fn run() -> i32 {
         }
     };
 
-    let status = match spawn_and_wait(&mut cmd) {
+    let status = match spawn_and_wait(&mut cmd, is_interactive) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{prefix}: exec bwrap: {e}");
@@ -895,6 +937,7 @@ mod tests {
         CHILD_PID.store(0, Ordering::Release);
         SIGINT_COUNT.store(0, Ordering::Release);
         LAST_SIGINT_SEC.store(0, Ordering::Release);
+        INTERACTIVE_MODE.store(false, Ordering::Release);
         unsafe {
             libc::alarm(0);
         }
@@ -983,5 +1026,44 @@ mod tests {
         assert_eq!(config.as_deref(), Some("/nix/store/xxx.json"));
         assert!(after_netns);
         assert_eq!(sandbox_args, vec!["-c", "echo"]);
+    }
+
+    #[test]
+    fn interactive_mode_skips_first_sigint() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        CHILD_PID.store(i32::MAX, Ordering::Release);
+        INTERACTIVE_MODE.store(true, Ordering::Release);
+
+        // First SIGINT in interactive mode: count increments but no kill is sent
+        // (the shell gets SIGINT from the terminal directly).
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 1);
+
+        // Second rapid SIGINT: escalates to SIGTERM (same as non-interactive)
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 2);
+
+        // Third rapid SIGINT: escalates to SIGKILL
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 3);
+
+        reset_signal_state();
+    }
+
+    #[test]
+    fn non_interactive_forwards_first_sigint() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        CHILD_PID.store(i32::MAX, Ordering::Release);
+        INTERACTIVE_MODE.store(false, Ordering::Release);
+
+        // First SIGINT in non-interactive mode: forwarded (kill returns ESRCH
+        // for i32::MAX, but we don't panic — the important thing is the path
+        // through the match arm is exercised).
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 1);
+
+        reset_signal_state();
     }
 }

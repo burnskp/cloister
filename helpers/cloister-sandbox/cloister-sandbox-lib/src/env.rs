@@ -30,6 +30,14 @@ pub fn build_run_cmd(
     }
 }
 
+/// Returns `true` when the sandbox will launch an interactive shell.
+///
+/// This matches the "interactive shell fallback" path in [`build_run_cmd`]:
+/// no explicit command args and no configured default command.
+pub fn is_interactive(command_args: &[String], default_command: Option<&[String]>) -> bool {
+    command_args.is_empty() && default_command.is_none()
+}
+
 /// Parse sandbox CLI arguments.
 ///
 /// Modes:
@@ -117,6 +125,28 @@ mod tests {
             &["-ozone-platform=wayland".to_string()],
         );
         assert_eq!(cmd, vec!["helium", "-ozone-platform=wayland"]);
+    }
+
+    #[test]
+    fn interactive_no_args_no_default() {
+        assert!(is_interactive(&[], None));
+    }
+
+    #[test]
+    fn not_interactive_with_command_args() {
+        assert!(!is_interactive(&["echo".to_string()], None));
+    }
+
+    #[test]
+    fn not_interactive_with_default_command() {
+        let default = vec!["geeqie".to_string()];
+        assert!(!is_interactive(&[], Some(&default)));
+    }
+
+    #[test]
+    fn not_interactive_with_both() {
+        let default = vec!["geeqie".to_string()];
+        assert!(!is_interactive(&["mpv".to_string()], Some(&default)));
     }
 
     #[test]

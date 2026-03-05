@@ -29,12 +29,17 @@ pub fn build_bwrap_command(
     extra_args: Vec<String>,
     run_cmd: &[String],
     start_dir: &str,
+    interactive: bool,
 ) -> io::Result<(Command, OwnedFd)> {
     // --- Collect all bwrap namespace/mount options ---
     let mut args: Vec<String> = Vec::new();
 
     // Core isolation flags
-    args.extend(["--die-with-parent", "--new-session", "--unshare-all"].map(String::from));
+    args.push("--die-with-parent".into());
+    if !interactive {
+        args.push("--new-session".into());
+    }
+    args.push("--unshare-all".into());
 
     // Network
     if config.network_enable {
@@ -292,8 +297,9 @@ mod tests {
         let config = minimal_config();
         let vars = HashMap::new();
         let run_cmd = vec!["helium".to_string(), "-ozone-platform=wayland".to_string()];
-        let (cmd, args_fd) = build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user")
-            .expect("build_bwrap_command failed");
+        let (cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
         let cmd_args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
 
         // The real command line should contain --args <fd>
@@ -333,5 +339,42 @@ mod tests {
 
         // --chdir should NOT be in the pipe (it stays on the real command line)
         assert!(!pipe_args.contains(&"--chdir"));
+    }
+
+    /// Helper to read NUL-separated args from the pipe returned by `build_bwrap_command`.
+    fn read_pipe_args(fd: OwnedFd) -> Vec<String> {
+        use std::io::Read;
+        let mut pipe_file = File::from(fd);
+        let mut content = Vec::new();
+        pipe_file.read_to_end(&mut content).unwrap();
+        content
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| std::str::from_utf8(s).unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn new_session_present_when_non_interactive() {
+        let config = minimal_config();
+        let vars = HashMap::new();
+        let run_cmd = vec!["echo".to_string(), "hello".to_string()];
+        let (_cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let pipe_args = read_pipe_args(args_fd);
+        assert!(pipe_args.contains(&"--new-session".to_string()));
+    }
+
+    #[test]
+    fn new_session_absent_when_interactive() {
+        let config = minimal_config();
+        let vars = HashMap::new();
+        let run_cmd = vec!["/nix/store/xxx-zsh/bin/zsh".to_string(), "-i".to_string()];
+        let (_cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", true)
+                .expect("build_bwrap_command failed");
+        let pipe_args = read_pipe_args(args_fd);
+        assert!(!pipe_args.contains(&"--new-session".to_string()));
     }
 }
