@@ -29,6 +29,18 @@ repos:
         entry: deadnix --fail
         language: system
         types: [nix]
+      - id: rust-test
+        name: rust tests
+        entry: nix develop -c make test-rust
+        language: system
+        pass_filenames: false
+        types: [rust]
+      - id: clippy
+        name: clippy
+        entry: nix develop -c make clippy
+        language: system
+        pass_filenames: false
+        types: [rust]
       - id: flake-check
         name: nix flake check
         entry: nix flake check

@@ -53,7 +53,7 @@ fn monotonic_seconds() -> i64 {
     unsafe {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     }
-    ts.tv_sec as i64
+    ts.tv_sec
 }
 
 /// Signal handler that forwards signals to the child process with escalation.

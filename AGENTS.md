@@ -16,3 +16,10 @@ nix flake check
 ```
 
 Before running `nix flake check`, make sure any new files are staged with git. The check runs against the git worktree snapshot, so unstaged new paths will be missing and the evaluation can fail.
+
+After you complete a set of changes to this repo that would modify any Rust source files, run the following commands and fix any warnings or errors. Do not ask for permission first; run the suite and report results:
+
+```
+nix develop -c make test-rust
+nix develop -c make clippy
+```
