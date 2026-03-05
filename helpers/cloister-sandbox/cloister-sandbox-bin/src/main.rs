@@ -1,7 +1,7 @@
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{self, ExitStatus};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 use cloister_sandbox_lib::bwrap;
 use cloister_sandbox_lib::config::SandboxConfig;
@@ -17,20 +17,108 @@ use cloister_sandbox_lib::wayland;
 /// PID of the active child process. 0 means no child is running.
 static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 
-/// Signal handler that forwards the received signal to the child process.
-/// Only uses async-signal-safe operations (atomic load + kill).
-extern "C" fn forward_signal(sig: libc::c_int) {
-    let pid = CHILD_PID.load(Ordering::Acquire);
-    if pid > 0 {
-        unsafe {
-            libc::kill(pid, sig);
-        }
+/// Number of rapid consecutive SIGINTs (resets after [`SIGINT_ESCALATION_WINDOW_SECS`]).
+static SIGINT_COUNT: AtomicI32 = AtomicI32::new(0);
+
+/// Monotonic timestamp (seconds) of the last SIGINT, for escalation windowing.
+static LAST_SIGINT_SEC: AtomicI64 = AtomicI64::new(0);
+
+/// If consecutive Ctrl-C presses are more than this many seconds apart, the
+/// escalation counter resets and the next press is treated as a fresh first press.
+const SIGINT_ESCALATION_WINDOW_SECS: i64 = 2;
+
+/// After forwarding SIGTERM, wait this many seconds before sending SIGKILL.
+const SIGTERM_GRACE_SECS: libc::c_uint = 10;
+
+/// Write to stderr from a signal handler (async-signal-safe).
+fn signal_write_stderr(msg: &[u8]) {
+    unsafe {
+        libc::write(
+            libc::STDERR_FILENO,
+            msg.as_ptr() as *const libc::c_void,
+            msg.len(),
+        );
     }
 }
 
-/// Install signal handlers for SIGTERM, SIGINT, and SIGHUP that forward to the child.
+/// Get the current monotonic time in seconds (async-signal-safe).
+fn monotonic_seconds() -> i64 {
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    ts.tv_sec as i64
+}
+
+/// Signal handler that forwards signals to the child process with escalation.
+///
+/// - **SIGINT**: Rapid consecutive presses escalate: SIGINT → SIGTERM → SIGKILL.
+///   Presses spaced more than [`SIGINT_ESCALATION_WINDOW_SECS`] apart reset the counter,
+///   so normal interactive Ctrl-C usage (e.g. cancelling a shell command) is unaffected.
+/// - **SIGTERM**: Forwarded to the child; a [`SIGTERM_GRACE_SECS`] alarm is set to
+///   send SIGKILL if the child hasn't exited by then.
+/// - **SIGALRM**: Sends SIGKILL to the child (grace period expired).
+/// - **SIGHUP**: Forwarded directly.
+///
+/// Only uses async-signal-safe operations (atomics, `kill`, `write`, `clock_gettime`, `alarm`).
+extern "C" fn forward_signal(sig: libc::c_int) {
+    let pid = CHILD_PID.load(Ordering::Acquire);
+    if pid <= 0 {
+        return;
+    }
+
+    match sig {
+        libc::SIGINT => {
+            let now = monotonic_seconds();
+            let last = LAST_SIGINT_SEC.swap(now, Ordering::AcqRel);
+            let count = if last == 0 || (now - last) > SIGINT_ESCALATION_WINDOW_SECS {
+                SIGINT_COUNT.store(1, Ordering::Release);
+                1
+            } else {
+                SIGINT_COUNT.fetch_add(1, Ordering::AcqRel) + 1
+            };
+
+            match count {
+                1 => unsafe {
+                    libc::kill(pid, libc::SIGINT);
+                },
+                2 => {
+                    signal_write_stderr(
+                        b"\ncloister-sandbox: requesting sandbox shutdown (Ctrl-C again to force)...\n",
+                    );
+                    unsafe {
+                        libc::kill(pid, libc::SIGTERM);
+                    }
+                }
+                _ => {
+                    signal_write_stderr(b"\ncloister-sandbox: force-killing sandbox.\n");
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        libc::SIGTERM => unsafe {
+            libc::kill(pid, libc::SIGTERM);
+            libc::alarm(SIGTERM_GRACE_SECS);
+        },
+        libc::SIGALRM => {
+            signal_write_stderr(
+                b"cloister-sandbox: graceful shutdown timed out, force-killing sandbox.\n",
+            );
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        _ => unsafe {
+            libc::kill(pid, sig);
+        },
+    }
+}
+
+/// Install signal handlers for SIGTERM, SIGINT, SIGHUP, and SIGALRM.
 fn install_signal_handlers() {
-    for &sig in &[libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+    for &sig in &[libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGALRM] {
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = forward_signal as *const () as usize;
@@ -43,9 +131,13 @@ fn install_signal_handlers() {
 /// Spawn a child process and wait for it, storing its PID so signal handlers
 /// can forward signals to it.
 ///
-/// Blocks SIGTERM/SIGINT/SIGHUP around the spawn→store window to prevent
-/// signals from being dropped when CHILD_PID is still 0.
+/// Blocks SIGTERM/SIGINT/SIGHUP/SIGALRM around the spawn→store window to
+/// prevent signals from being dropped when CHILD_PID is still 0.
 fn spawn_and_wait(cmd: &mut process::Command) -> io::Result<ExitStatus> {
+    // Reset escalation state for new child
+    SIGINT_COUNT.store(0, Ordering::Release);
+    LAST_SIGINT_SEC.store(0, Ordering::Release);
+
     // Block forwarded signals before spawn so none are lost in the race window
     let mut block_set: libc::sigset_t = unsafe { std::mem::zeroed() };
     let mut old_set: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -54,6 +146,7 @@ fn spawn_and_wait(cmd: &mut process::Command) -> io::Result<ExitStatus> {
         libc::sigaddset(&mut block_set, libc::SIGTERM);
         libc::sigaddset(&mut block_set, libc::SIGINT);
         libc::sigaddset(&mut block_set, libc::SIGHUP);
+        libc::sigaddset(&mut block_set, libc::SIGALRM);
         libc::sigprocmask(libc::SIG_BLOCK, &block_set, &mut old_set);
     }
 
@@ -76,6 +169,10 @@ fn spawn_and_wait(cmd: &mut process::Command) -> io::Result<ExitStatus> {
 
     let status = child.wait();
     CHILD_PID.store(0, Ordering::Release);
+    // Cancel any pending alarm (e.g. from SIGTERM grace period)
+    unsafe {
+        libc::alarm(0);
+    }
     status
 }
 
@@ -678,6 +775,13 @@ fn parse_cli_args(args: &[String]) -> (Option<String>, bool, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serialize tests that touch shared signal statics (CHILD_PID, SIGINT_COUNT, etc.).
+    fn signal_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -786,23 +890,82 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Reset signal-handler statics so tests don't interfere with each other.
+    fn reset_signal_state() {
+        CHILD_PID.store(0, Ordering::Release);
+        SIGINT_COUNT.store(0, Ordering::Release);
+        LAST_SIGINT_SEC.store(0, Ordering::Release);
+        unsafe {
+            libc::alarm(0);
+        }
+    }
+
     #[test]
     fn child_pid_initially_zero() {
+        let _guard = signal_lock().lock().unwrap();
         assert_eq!(CHILD_PID.load(Ordering::Acquire), 0);
     }
 
     #[test]
     fn forward_signal_noop_when_no_child() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
         // Should not panic or error when CHILD_PID is 0
         forward_signal(libc::SIGTERM);
+        forward_signal(libc::SIGINT);
+        forward_signal(libc::SIGALRM);
     }
 
     #[test]
     fn forward_signal_handles_nonexistent_pid() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
         // Use a PID that almost certainly doesn't exist
         CHILD_PID.store(i32::MAX, Ordering::Release);
         forward_signal(libc::SIGTERM); // kill returns ESRCH, but we don't panic
-        CHILD_PID.store(0, Ordering::Release);
+        reset_signal_state();
+    }
+
+    #[test]
+    fn sigint_escalation_rapid() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        CHILD_PID.store(i32::MAX, Ordering::Release);
+
+        // First SIGINT: count should be 1
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 1);
+
+        // Second SIGINT (immediate — within escalation window): count should be 2
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 2);
+
+        // Third SIGINT: count should be 3
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 3);
+
+        reset_signal_state();
+    }
+
+    #[test]
+    fn sigint_resets_after_window() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        CHILD_PID.store(i32::MAX, Ordering::Release);
+
+        // First SIGINT
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 1);
+
+        // Simulate time passing beyond the escalation window
+        let past = monotonic_seconds() - SIGINT_ESCALATION_WINDOW_SECS - 1;
+        LAST_SIGINT_SEC.store(past, Ordering::Release);
+
+        // Next SIGINT should reset to 1
+        forward_signal(libc::SIGINT);
+        assert_eq!(SIGINT_COUNT.load(Ordering::Acquire), 1);
+
+        reset_signal_state();
     }
 
     #[test]
