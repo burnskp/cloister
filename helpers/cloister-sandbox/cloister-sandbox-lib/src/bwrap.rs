@@ -138,12 +138,12 @@ pub fn build_bwrap_command(
     // Terminate bwrap option processing so app flags aren't misinterpreted
     cmd.arg("--");
 
-    // Inject tini as PID 1 inside the sandbox to handle signal forwarding.
-    // With --unshare-all the sandboxed process becomes PID 1, where the kernel
-    // drops signals with SIG_DFL disposition. tini installs real handlers,
-    // forwards signals to the child process group (-g), and reaps zombies.
+    // Inject tini inside the sandbox to handle signal forwarding and zombie
+    // reaping. bwrap stays as PID 1 in the new PID namespace, so tini runs as
+    // PID 2. Flags: -s registers as a child subreaper (required since tini is
+    // not PID 1), -g forwards signals to the child's entire process group.
     if let Some(ref init_path) = config.init_path {
-        cmd.args([init_path.as_str(), "-g", "--"]);
+        cmd.args([init_path.as_str(), "-sg", "--"]);
     }
 
     // The command to run inside the sandbox
@@ -394,7 +394,7 @@ mod tests {
             &cmd_args[dash_pos + 1..],
             &[
                 "/nix/store/xxx-tini/bin/tini",
-                "-g",
+                "-sg",
                 "--",
                 "helium",
                 "-ozone-platform=wayland"
@@ -463,7 +463,7 @@ mod tests {
             .expect("-- not found");
         assert_eq!(
             &cmd_args[dash_pos + 1..],
-            &["/nix/store/xxx-tini/bin/tini", "-g", "--", "helium"]
+            &["/nix/store/xxx-tini/bin/tini", "-sg", "--", "helium"]
         );
     }
 
