@@ -76,6 +76,8 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub netns_helper_path: Option<String>,
     pub git_path: String,
+    #[serde(default)]
+    pub init_path: Option<String>,
 
     /// Static bwrap args: pre-computed by Nix (dirs, tmpfs, symlinks, store-path binds, env)
     #[serde(default)]

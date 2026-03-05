@@ -138,6 +138,14 @@ pub fn build_bwrap_command(
     // Terminate bwrap option processing so app flags aren't misinterpreted
     cmd.arg("--");
 
+    // Inject tini as PID 1 inside the sandbox to handle signal forwarding.
+    // With --unshare-all the sandboxed process becomes PID 1, where the kernel
+    // drops signals with SIG_DFL disposition. tini installs real handlers,
+    // forwards signals to the child process group (-g), and reaps zombies.
+    if let Some(ref init_path) = config.init_path {
+        cmd.args([init_path.as_str(), "-g", "--"]);
+    }
+
     // The command to run inside the sandbox
     cmd.args(run_cmd);
 
@@ -309,6 +317,7 @@ mod tests {
             "per_dir_base": "/home/user/.local/state/cloister",
             "copy_file_base": "/home/user/.local/state/cloister",
             "git_path": "/nix/store/xxx-git/bin/git",
+            "init_path": "/nix/store/xxx-tini/bin/tini",
         });
         serde_json::from_value(json).unwrap()
     }
@@ -376,14 +385,20 @@ mod tests {
         let fd_str = cmd_args[args_pos + 1];
         assert_eq!(fd_str, args_fd.as_raw_fd().to_string());
 
-        // -- and run command should still be on the real command line
+        // --, tini, and run command should still be on the real command line
         let dash_pos = cmd_args
             .iter()
             .position(|&a| a == "--")
             .expect("-- not found");
         assert_eq!(
             &cmd_args[dash_pos + 1..],
-            &["helium", "-ozone-platform=wayland"]
+            &[
+                "/nix/store/xxx-tini/bin/tini",
+                "-g",
+                "--",
+                "helium",
+                "-ozone-platform=wayland"
+            ]
         );
 
         // Read the pipe and verify NUL-separated bwrap options
@@ -430,6 +445,45 @@ mod tests {
                 .expect("build_bwrap_command failed");
         let pipe_args = read_pipe_args(args_fd);
         assert!(pipe_args.contains(&"--new-session".to_string()));
+    }
+
+    #[test]
+    fn tini_prepended_to_command() {
+        let config = minimal_config();
+        let vars = HashMap::new();
+        let run_cmd = vec!["helium".to_string()];
+        let (cmd, _args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let cmd_args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+
+        let dash_pos = cmd_args
+            .iter()
+            .position(|&a| a == "--")
+            .expect("-- not found");
+        assert_eq!(
+            &cmd_args[dash_pos + 1..],
+            &["/nix/store/xxx-tini/bin/tini", "-g", "--", "helium"]
+        );
+    }
+
+    #[test]
+    fn tini_absent_when_not_configured() {
+        let mut config = minimal_config();
+        config.init_path = None;
+        let vars = HashMap::new();
+        let run_cmd = vec!["helium".to_string()];
+        let (cmd, _args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let cmd_args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+
+        let dash_pos = cmd_args
+            .iter()
+            .position(|&a| a == "--")
+            .expect("-- not found");
+        // With no init_path, the run command follows -- directly
+        assert_eq!(&cmd_args[dash_pos + 1..], &["helium"]);
     }
 
     #[test]

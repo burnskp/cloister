@@ -70,6 +70,7 @@ let
     netns_helper_path =
       if sCfg.network.namespace != null then "/run/wrappers/bin/cloister-netns" else null;
     git_path = "${pkgs.git}/bin/git";
+    init_path = "${pkgs.tini}/bin/tini";
 
     static_bwrap_args = bwrapLib.mkBwrapArgs {
       dirs =
