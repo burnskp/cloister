@@ -166,12 +166,15 @@ pub fn discover_gpu_pci_sysfs_paths() -> Vec<String> {
     pci_paths
 }
 
-/// Discover `/sys/dev/char/MAJ:MIN` paths for DRI device nodes in `/dev/dri/`.
+/// Discover `/sys/dev/char/MAJ:MIN` symlink entries for DRI device nodes in `/dev/dri/`.
 ///
 /// Reads `/dev/dri/`, stats each `card*` and `renderD*` entry to extract the
-/// device major:minor numbers, and returns the corresponding sysfs char paths.
-/// Results are deduplicated.
-pub fn discover_dri_char_entries() -> Vec<String> {
+/// device major:minor numbers, reads the corresponding sysfs char symlink target,
+/// and returns `(char_path, link_target)` pairs. Results are deduplicated.
+///
+/// The symlink targets are needed because Mesa/libdrm uses `readlink()` on these
+/// paths to resolve device nodes — a bind-mounted directory would break this.
+pub fn discover_dri_char_entries() -> Vec<(String, String)> {
     let dri_dir = Path::new("/dev/dri");
     if !dri_dir.is_dir() {
         return Vec::new();
@@ -182,7 +185,7 @@ pub fn discover_dri_char_entries() -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    let mut char_paths: Vec<String> = Vec::new();
+    let mut char_entries: Vec<(String, String)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
@@ -202,12 +205,18 @@ pub fn discover_dri_char_entries() -> Vec<String> {
         let minor = libc::minor(rdev);
         let char_path = format!("/sys/dev/char/{major}:{minor}");
 
-        if !char_paths.contains(&char_path) {
-            char_paths.push(char_path);
+        // Read the symlink target so we can recreate it inside the sandbox
+        let link_target = match std::fs::read_link(&char_path) {
+            Ok(t) => t.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+
+        if !char_entries.iter().any(|(p, _)| p == &char_path) {
+            char_entries.push((char_path, link_target));
         }
     }
 
-    char_paths
+    char_entries
 }
 
 /// Build GPU acceleration arguments.
@@ -232,11 +241,11 @@ pub fn gpu_args(shm: bool) -> Vec<String> {
         ]);
     }
 
-    // GPU-specific /sys/dev/char/MAJ:MIN entries for DRI device node resolution
-    for char_path in discover_dri_char_entries() {
-        if Path::new(&char_path).exists() {
-            args.extend(["--ro-bind".to_string(), char_path.clone(), char_path]);
-        }
+    // GPU-specific /sys/dev/char/MAJ:MIN symlinks for DRI device node resolution.
+    // Mesa/libdrm expects these to be symlinks (uses readlink), not bind-mounted
+    // directories, so we recreate the symlinks rather than bind-mounting.
+    for (char_path, link_target) in discover_dri_char_entries() {
+        args.extend(["--symlink".to_string(), link_target, char_path]);
     }
 
     // Auto-detected GPU PCI sysfs paths (vendor/device ID lookup)
@@ -770,22 +779,26 @@ mod tests {
 
     #[test]
     fn discover_dri_char_entries_returns_vec() {
-        let paths = discover_dri_char_entries();
+        let entries = discover_dri_char_entries();
         // Should not panic; on systems with GPUs, paths start with /sys/dev/char/
-        for path in &paths {
+        for (path, target) in &entries {
             assert!(
                 path.starts_with("/sys/dev/char/"),
                 "Expected DRI char path to start with /sys/dev/char/, got: {path}"
+            );
+            assert!(
+                !target.is_empty(),
+                "Expected non-empty symlink target for {path}"
             );
         }
     }
 
     #[test]
     fn discover_dri_char_entries_no_duplicates() {
-        let paths = discover_dri_char_entries();
-        let unique: std::collections::HashSet<&String> = paths.iter().collect();
+        let entries = discover_dri_char_entries();
+        let unique: std::collections::HashSet<&String> = entries.iter().map(|(p, _)| p).collect();
         assert_eq!(
-            paths.len(),
+            entries.len(),
             unique.len(),
             "Expected no duplicate DRI char entries"
         );
