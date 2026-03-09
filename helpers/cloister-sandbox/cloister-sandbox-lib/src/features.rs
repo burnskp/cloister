@@ -166,6 +166,27 @@ pub fn discover_gpu_pci_sysfs_paths() -> Vec<String> {
     pci_paths
 }
 
+/// Discover the PCI driver directories referenced by GPU PCI devices.
+///
+/// For each GPU PCI device path from [`discover_gpu_pci_sysfs_paths`], reads the
+/// `driver` symlink (e.g. `/sys/devices/pci0000:00/0000:01:00.0/driver`) and
+/// canonicalizes it to get the full driver directory path
+/// (e.g. `/sys/bus/pci/drivers/nvidia`). Results are deduplicated.
+pub fn discover_gpu_pci_driver_paths() -> Vec<String> {
+    let mut driver_paths: Vec<String> = Vec::new();
+    for pci_path in discover_gpu_pci_sysfs_paths() {
+        let driver_link = format!("{pci_path}/driver");
+        let canonical = match Path::new(&driver_link).canonicalize() {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+        if !driver_paths.contains(&canonical) {
+            driver_paths.push(canonical);
+        }
+    }
+    driver_paths
+}
+
 /// Discover `/sys/dev/char/MAJ:MIN` symlink entries for DRI device nodes in `/dev/dri/`.
 ///
 /// Reads `/dev/dri/`, stats each `card*` and `renderD*` entry to extract the
@@ -252,6 +273,17 @@ pub fn gpu_args(shm: bool) -> Vec<String> {
     for pci_path in discover_gpu_pci_sysfs_paths() {
         if Path::new(&pci_path).is_dir() {
             args.extend(["--ro-bind".to_string(), pci_path.clone(), pci_path]);
+        }
+    }
+
+    // PCI driver directories: Mesa/libdrm follows the `driver` symlink inside
+    // each PCI device directory to resolve the kernel driver name. That symlink
+    // points into /sys/bus/pci/drivers/<name>. We only bind the specific driver
+    // directories used by discovered GPUs to avoid leaking the full list of PCI
+    // drivers on the system (which would be a fingerprinting vector).
+    for driver_path in discover_gpu_pci_driver_paths() {
+        if Path::new(&driver_path).is_dir() {
+            args.extend(["--ro-bind".to_string(), driver_path.clone(), driver_path]);
         }
     }
 
@@ -824,6 +856,29 @@ mod tests {
             paths.len(),
             unique.len(),
             "Expected no duplicate GPU PCI sysfs paths"
+        );
+    }
+
+    #[test]
+    fn discover_gpu_pci_driver_paths_returns_vec() {
+        let paths = discover_gpu_pci_driver_paths();
+        // Should not panic; on systems with GPUs, paths point into /sys/bus/pci/drivers/
+        for path in &paths {
+            assert!(
+                path.starts_with("/sys/"),
+                "Expected GPU PCI driver path to start with /sys/, got: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn discover_gpu_pci_driver_paths_no_duplicates() {
+        let paths = discover_gpu_pci_driver_paths();
+        let unique: std::collections::HashSet<&String> = paths.iter().collect();
+        assert_eq!(
+            paths.len(),
+            unique.len(),
+            "Expected no duplicate GPU PCI driver paths"
         );
     }
 
