@@ -574,6 +574,12 @@ fn run() -> i32 {
                 _wayland_keep_alive = None;
                 wayland_socket_path = None;
             }
+            // Electron/Chromium apps need this to use native Wayland via Ozone
+            extra_args.extend([
+                "--setenv".to_string(),
+                "NIXOS_OZONE_WL".to_string(),
+                "1".to_string(),
+            ]);
         } else {
             _wayland_keep_alive = None;
             wayland_socket_path = None;
