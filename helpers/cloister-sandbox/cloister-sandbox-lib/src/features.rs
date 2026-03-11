@@ -187,6 +187,31 @@ pub fn discover_gpu_pci_driver_paths() -> Vec<String> {
     driver_paths
 }
 
+/// Discover `/sys/bus/pci/devices/<addr>` symlinks for GPU PCI devices.
+///
+/// For each GPU PCI device path from [`discover_gpu_pci_sysfs_paths`], extracts the
+/// PCI address (the last path component, e.g. `0000:00:02.0`) and reads the
+/// corresponding `/sys/bus/pci/devices/<addr>` symlink target.
+/// Returns `(symlink_path, link_target)` pairs for use with `--symlink`.
+pub fn discover_gpu_pci_device_symlinks() -> Vec<(String, String)> {
+    let mut symlinks: Vec<(String, String)> = Vec::new();
+    for pci_path in discover_gpu_pci_sysfs_paths() {
+        let pci_addr = match Path::new(&pci_path).file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => continue,
+        };
+        let symlink_path = format!("/sys/bus/pci/devices/{pci_addr}");
+        let link_target = match std::fs::read_link(&symlink_path) {
+            Ok(t) => t.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+        if !symlinks.iter().any(|(p, _)| p == &symlink_path) {
+            symlinks.push((symlink_path, link_target));
+        }
+    }
+    symlinks
+}
+
 /// Discover `/sys/dev/char/MAJ:MIN` symlink entries for DRI device nodes in `/dev/dri/`.
 ///
 /// Reads `/dev/dri/`, stats each `card*` and `renderD*` entry to extract the
@@ -285,6 +310,14 @@ pub fn gpu_args(shm: bool) -> Vec<String> {
         if Path::new(&driver_path).is_dir() {
             args.extend(["--ro-bind".to_string(), driver_path.clone(), driver_path]);
         }
+    }
+
+    // /sys/bus/pci/devices/<addr> symlinks: libpci and Chromium's GPU process
+    // enumerate PCI devices via this directory. Each entry is a symlink pointing
+    // to the actual device directory under /sys/devices/. We recreate only the
+    // symlinks for discovered GPU devices.
+    for (symlink_path, link_target) in discover_gpu_pci_device_symlinks() {
+        args.extend(["--symlink".to_string(), link_target, symlink_path]);
     }
 
     if shm {
@@ -925,6 +958,33 @@ mod tests {
                 "Expected GPU PCI driver path to start with /sys/, got: {path}"
             );
         }
+    }
+
+    #[test]
+    fn discover_gpu_pci_device_symlinks_returns_vec() {
+        let symlinks = discover_gpu_pci_device_symlinks();
+        for (path, target) in &symlinks {
+            assert!(
+                path.starts_with("/sys/bus/pci/devices/"),
+                "Expected PCI device symlink to start with /sys/bus/pci/devices/, got: {path}"
+            );
+            assert!(
+                !target.is_empty(),
+                "Expected non-empty symlink target for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn discover_gpu_pci_device_symlinks_no_duplicates() {
+        let symlinks = discover_gpu_pci_device_symlinks();
+        let unique: std::collections::HashSet<&String> =
+            symlinks.iter().map(|(p, _)| p).collect();
+        assert_eq!(
+            symlinks.len(),
+            unique.len(),
+            "Expected no duplicate GPU PCI device symlinks"
+        );
     }
 
     #[test]
