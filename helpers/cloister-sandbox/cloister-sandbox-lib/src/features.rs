@@ -978,8 +978,7 @@ mod tests {
     #[test]
     fn discover_gpu_pci_device_symlinks_no_duplicates() {
         let symlinks = discover_gpu_pci_device_symlinks();
-        let unique: std::collections::HashSet<&String> =
-            symlinks.iter().map(|(p, _)| p).collect();
+        let unique: std::collections::HashSet<&String> = symlinks.iter().map(|(p, _)| p).collect();
         assert_eq!(
             symlinks.len(),
             unique.len(),
