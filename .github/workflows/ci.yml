@@ -16,12 +16,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
       - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: cloister
-          authToken: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
-          skipPush: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-          useDaemon: true
       - uses: DeterminateSystems/flake-checker-action@3164002371bc90729c68af0e24d5aacf20d7c9f6 # v12
       - run: |
           bash -o pipefail -c 'nix flake check --print-build-logs 2> >(grep -v "unknown flake output '\''homeManagerModules'\''" >&2)'
@@ -31,12 +25,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
       - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: cloister
-          authToken: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
-          skipPush: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-          useDaemon: true
       - run: nix build .#checks.x86_64-linux.treefmt --print-build-logs
   lint:
     runs-on: ubuntu-latest
@@ -44,12 +32,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
       - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: cloister
-          authToken: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
-          skipPush: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-          useDaemon: true
       - run: nix run nixpkgs#statix -- check .
       - run: nix run nixpkgs#deadnix -- --fail .
   rust-tests:
@@ -58,12 +40,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
       - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: cloister
-          authToken: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
-          skipPush: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-          useDaemon: true
       - run: nix develop -c make test-rust
   clippy:
     runs-on: ubuntu-latest
@@ -71,12 +47,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
       - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: cloister
-          authToken: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
-          skipPush: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-          useDaemon: true
       - name: Clippy
         run: nix develop -c make clippy
   cargo-audit:
@@ -85,12 +55,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
       - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: cloister
-          authToken: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
-          skipPush: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
-          useDaemon: true
       - name: Audit Rust dependencies
         run: |
           for workspace in helpers/cloister-netns helpers/cloister-sandbox helpers/cloister-seccomp-filter helpers/cloister-seccomp-validate helpers/cloister-dbus-validate helpers/cloister-wayland-validate; do
@@ -100,3 +64,32 @@ jobs:
               echo "::endgroup::"
             fi
           done
+  cachix-upload:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - flake-check
+      - format
+      - lint
+      - rust-tests
+      - clippy
+      - cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+      - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
+      - name: Upload to Cachix
+        uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        with:
+          name: cloister
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          useDaemon: true
+      - name: Build and upload packages
+        run: |
+          nix build --print-build-logs \
+            .#packages.x86_64-linux.cloister-netns \
+            .#packages.x86_64-linux.cloister-wayland-validate \
+            .#packages.x86_64-linux.cloister-dbus-validate \
+            .#packages.x86_64-linux.cloister-seccomp-filter \
+            .#packages.x86_64-linux.cloister-seccomp-validate \
+            .#packages.x86_64-linux.cloister-sandbox
