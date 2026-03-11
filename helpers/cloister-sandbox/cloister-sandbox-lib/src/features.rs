@@ -785,6 +785,62 @@ pub fn check_dbus_socket(xdg_runtime_dir: &str, socket_name: &str) -> Vec<String
     Vec::new()
 }
 
+/// Pre-connect to the D-Bus proxy socket to trigger systemd socket activation
+/// and wait for the proxy to become ready before launching the sandbox.
+///
+/// Without this, the first sandboxed app to connect triggers socket activation
+/// and blocks on the D-Bus SASL handshake while `xdg-dbus-proxy` starts up and
+/// connects to the real session bus. This can cause a visible hang on first launch.
+///
+/// Returns the connected stream. The caller must keep it alive until the sandbox
+/// exits so that `xdg-dbus-proxy` doesn't exit between warm-up and app connect.
+pub fn warm_dbus_proxy(
+    xdg_runtime_dir: &str,
+    socket_name: &str,
+) -> Option<std::os::unix::net::UnixStream> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let socket_path = format!("{xdg_runtime_dir}/{socket_name}");
+    let mut stream = match UnixStream::connect(&socket_path) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+
+    let timeout = Some(Duration::from_secs(5));
+    let _ = stream.set_write_timeout(timeout);
+    let _ = stream.set_read_timeout(timeout);
+
+    // D-Bus SASL EXTERNAL authentication handshake.
+    // Completing this ensures xdg-dbus-proxy has connected to the host bus
+    // and is ready to proxy messages for the sandboxed application.
+    let uid = unsafe { libc::getuid() };
+    let hex_uid: String = uid
+        .to_string()
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    if stream
+        .write_all(format!("\0AUTH EXTERNAL {hex_uid}\r\n").as_bytes())
+        .is_err()
+    {
+        return Some(stream);
+    }
+
+    // Read the server response (expect "OK <guid>\r\n").
+    let mut buf = [0u8; 256];
+    if let Ok(n) = stream.read(&mut buf) {
+        let response = std::str::from_utf8(&buf[..n]).unwrap_or("");
+        if response.starts_with("OK") {
+            let _ = stream.write_all(b"BEGIN\r\n");
+        }
+    }
+
+    Some(stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

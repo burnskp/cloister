@@ -656,9 +656,15 @@ fn run() -> i32 {
     }
 
     // D-Bus
+    let _dbus_keepalive;
     if config.dbus_enable {
         if let Some(ref socket_name) = config.dbus_proxy_socket_name {
             features::check_dbus_socket(&xdg_runtime_dir, socket_name);
+            // Pre-connect to trigger socket activation and wait for readiness.
+            // Held alive until the sandbox exits to prevent proxy shutdown.
+            _dbus_keepalive = features::warm_dbus_proxy(&xdg_runtime_dir, socket_name);
+        } else {
+            _dbus_keepalive = None;
         }
         if !xdg_runtime_dir.is_empty() {
             extra_args.extend([
@@ -667,6 +673,8 @@ fn run() -> i32 {
                 format!("unix:path={xdg_runtime_dir}/bus"),
             ]);
         }
+    } else {
+        _dbus_keepalive = None;
     }
 
     // --- 10. Parse command args and build run_cmd ---
