@@ -87,6 +87,35 @@ cloister.url = "github:burnskp/cloister";
 
 After adding the input, run `nix flake lock --update-input cloister` to fetch it, then rebuild.
 
+## Binary cache
+
+CI publishes successful `main` branch builds to the public Cachix cache at `https://cloister.cachix.org`. Add that cache to your Nix config so `cloister` packages can be substituted instead of rebuilt locally.
+
+If you manage Nix settings from NixOS, add:
+
+```nix
+{
+  nix.settings = {
+    substituters = [
+      "https://cache.nixos.org"
+      "https://cloister.cachix.org"
+    ];
+    trusted-public-keys = [
+      "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+      "cloister.cachix.org-1:GUb1etvIAEHHSaC0Ao2H57cofUZrs6Nxq0E642HVQ8M="
+    ];
+  };
+}
+```
+
+If you use Cachix tooling directly, run:
+
+```sh
+cachix use cloister
+```
+
+On non-NixOS systems without `cachix`, add the same substituter and key to `nix.conf`.
+
 ### Usage
 
 Each sandbox defined under `cloister.sandboxes.<name>` produces a `cl-<name>` binary.
