@@ -1,6 +1,7 @@
 { testLib }:
 let
   inherit (testLib)
+    pkgs
     evalConfig
     mkCheck
     mkConfigCheck
@@ -55,9 +56,10 @@ let
     in
     (builtins.getAttr (builtins.head matches) config.xdg.configFile).text;
 
+  pipewireConfText = getConfigFileText pipewireFiltersConfig "pipewire/pipewire.conf.d/99-cloister.conf";
   pipewireWireplumberConfText = getConfigFileText pipewireFiltersConfig "wireplumber/wireplumber.conf.d/99-cloister-";
 
-  pipewireRoutingLuaText = getConfigFileText pipewireRoutingConfig "wireplumber/scripts/access-cloister-";
+  pipewireRoutingConfText = getConfigFileText pipewireRoutingConfig "wireplumber/wireplumber.conf.d/99-cloister-";
 in
 {
   # ── Assertion tests (bad config should fire) ──────────────────────────
@@ -1154,18 +1156,32 @@ in
       ''"pipewire_socket_name":"pipewire-cloister-''
       true;
 
+  pipewire-filters-configures-protocol-native-socket =
+    mkCheck "sandbox-pipewire-filters-configures-protocol-native-socket"
+      (
+        lib.hasInfix "module.protocol-native.args = {" pipewireConfText
+        && lib.hasInfix ''{ name = "pipewire-cloister-'' pipewireConfText
+        && lib.hasInfix "module.access.args = {" pipewireConfText
+        && lib.hasInfix ''pipewire-0-manager = "unrestricted"'' pipewireConfText
+      );
+
   pipewire-filters-keep-baseline-rx = mkCheck "sandbox-pipewire-filters-keep-baseline-rx" (
     lib.hasInfix ''default_permissions = "rx"'' pipewireWireplumberConfText
   );
 
   pipewire-routing-uses-metadata-object-ids =
-    mkCheck "sandbox-pipewire-routing-uses-metadata-object-ids"
-      (
-        lib.hasInfix ''type = "metadata"'' pipewireRoutingLuaText
-        && lib.hasInfix ''local metadata_id = metadata["bound-id"]'' pipewireRoutingLuaText
-        && lib.hasInfix ''client:update_permissions { [metadata_id] = "rxm" }'' pipewireRoutingLuaText
-        && !lib.hasInfix ''["Metadata"]'' pipewireRoutingLuaText
-      );
+    let
+      confFile = pkgs.writeText "routing-conf" pipewireRoutingConfText;
+    in
+    pkgs.runCommand "check-sandbox-pipewire-routing-uses-metadata-object-ids" { } ''
+      # Extract the Lua script store path from the WirePlumber conf
+      lua_path=$(${pkgs.gnugrep}/bin/grep -oP '/nix/store/[^,]+\.lua' ${confFile})
+      ${pkgs.gnugrep}/bin/grep -qF 'type = "metadata"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'local metadata_id = metadata["bound-id"]' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'client:update_permissions { [metadata_id] = "rxm" }' "$lua_path"
+      ! ${pkgs.gnugrep}/bin/grep -qF '["Metadata"]' "$lua_path"
+      touch $out
+    '';
 
   # ── Printing enable/disable tests ──────────────────────────────
 
