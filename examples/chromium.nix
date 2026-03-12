@@ -31,8 +31,12 @@
     # gui.gpu.enable is auto-set to true when wayland is enabled
     # gui.gpu.shm = true;  # default — /dev/shm needed by Chromium's multi-process IPC
 
-    # Audio
-    audio.pulseaudio.enable = true;
+    # Audio (PipeWire with filtering — only expose speakers)
+    audio.pipewire = {
+      enable = true;
+      filters.enable = true;
+      # audioOut is true by default; audioIn/videoIn/control/routing are false
+    };
 
     # FIDO2 / WebAuthn
     fido2.enable = true;

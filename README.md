@@ -162,7 +162,7 @@ CLOISTER_DIR=/path/to/project cl-dev
 - **Home-manager integration** - bind Nix store-backed config files directly into the sandbox
 - **Wayland forwarding** - with `wp-security-context-v1` to filter privileged protocols
 - **X11 forwarding** - `DISPLAY` passthrough (no client isolation - prefer Wayland)
-- **PulseAudio** - audio playback via PulseAudio/PipeWire socket forwarding
+- **PipeWire / PulseAudio** - audio with optional per-sandbox device filtering via WirePlumber
 - **D-Bus notifications** - per-sandbox filtered proxy with configurable policies
 - **SSH agent** - forward `SSH_AUTH_SOCK` into the sandbox (optional fingerprint filtering + timeout)
 - **Dangerous path detection** - build-time checks prevent accidentally binding credential locations
@@ -203,6 +203,7 @@ All per-sandbox options live under `cloister.sandboxes.<name>.*`. See [Configura
 | | `gui.fonts.packages` | list of package | `[]`* | Font packages for fontconfig (*`dejavu_fonts` with GUI) |
 | **Audio** | `audio.pulseaudio.enable` | bool | `false` | Forward PulseAudio socket |
 | | `audio.pipewire.enable` | bool | `false` | Forward PipeWire socket |
+| | `audio.pipewire.filters.enable` | bool | `false` | Enable PipeWire filtering rules |
 | **Hardware** | `video.enable` | bool | `false` | Bind webcam/camera devices |
 | | `fido2.enable` | bool | `false` | Bind FIDO2/U2F devices |
 | | `printing.enable` | bool | `false` | Forward CUPS socket |
@@ -232,8 +233,8 @@ For deep details, see the following documents:
 
 See the [examples/](examples/) directory for complete, importable sandbox configurations:
 
-- **[chromium.nix](examples/chromium.nix)** - Sandboxed browser with GPU, audio, notifications, and desktop entry
-- **[discord.nix](examples/discord.nix)** - Sandboxed Discord with Wayland, audio, and Flatpak-aligned D-Bus policies
+- **[chromium.nix](examples/chromium.nix)** - Sandboxed browser with GPU, filtered PipeWire audio, notifications, and desktop entry
+- **[discord.nix](examples/discord.nix)** - Sandboxed Discord with Wayland, filtered PipeWire (mic + camera), and Flatpak-aligned D-Bus policies
 - **[evince.nix](examples/evince.nix)** - Network-isolated PDF viewer with desktop entry and MIME type registration
 - **[nixdev.nix](examples/nixdev.nix)** - Nix configuration development with editor, LSP, formatters, and persistent caches
 - **[shell-custom-rc.nix](examples/shell-custom-rc.nix)** - Shell rc subset configuration with per-sandbox zshrc files

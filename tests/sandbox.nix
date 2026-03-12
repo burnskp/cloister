@@ -15,6 +15,49 @@ let
       sandboxes.test = { };
     };
   };
+
+  pipewireFiltersConfig = evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.audio.pipewire = {
+            enable = true;
+            filters.enable = true;
+          };
+        };
+      }
+    ];
+  };
+
+  pipewireRoutingConfig = evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.audio.pipewire = {
+            enable = true;
+            filters = {
+              enable = true;
+              routing = true;
+            };
+          };
+        };
+      }
+    ];
+  };
+
+  getConfigFileText =
+    config: prefix:
+    let
+      names = builtins.attrNames config.xdg.configFile;
+      matches = builtins.filter (name: lib.hasPrefix prefix name) names;
+    in
+    (builtins.getAttr (builtins.head matches) config.xdg.configFile).text;
+
+  pipewireWireplumberConfText = getConfigFileText pipewireFiltersConfig "wireplumber/wireplumber.conf.d/99-cloister-";
+
+  pipewireRoutingLuaText = getConfigFileText pipewireRoutingConfig "wireplumber/scripts/access-cloister-";
 in
 {
   # ── Assertion tests (bad config should fire) ──────────────────────────
@@ -1093,7 +1136,7 @@ in
         };
       }
     ];
-  }) "test" ''"pipewire_enable":true'' true;
+  }) "test" ''"pipewire_socket_name":"pipewire-0"'' true;
 
   pipewire-disable = mkConfigCheck "sandbox-pipewire-disable" (evalConfig {
     modules = [
@@ -1104,7 +1147,25 @@ in
         };
       }
     ];
-  }) "test" ''"pipewire_enable":false'' true;
+  }) "test" ''"pipewire_socket_name":null'' true;
+
+  pipewire-filters =
+    mkConfigCheck "sandbox-pipewire-filters" pipewireFiltersConfig "test"
+      ''"pipewire_socket_name":"pipewire-cloister-''
+      true;
+
+  pipewire-filters-keep-baseline-rx = mkCheck "sandbox-pipewire-filters-keep-baseline-rx" (
+    lib.hasInfix ''default_permissions = "rx"'' pipewireWireplumberConfText
+  );
+
+  pipewire-routing-uses-metadata-object-ids =
+    mkCheck "sandbox-pipewire-routing-uses-metadata-object-ids"
+      (
+        lib.hasInfix ''type = "metadata"'' pipewireRoutingLuaText
+        && lib.hasInfix ''local metadata_id = metadata["bound-id"]'' pipewireRoutingLuaText
+        && lib.hasInfix ''client:update_permissions { [metadata_id] = "rxm" }'' pipewireRoutingLuaText
+        && !lib.hasInfix ''["Metadata"]'' pipewireRoutingLuaText
+      );
 
   # ── Printing enable/disable tests ──────────────────────────────
 

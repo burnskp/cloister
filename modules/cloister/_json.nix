@@ -28,6 +28,7 @@
   copyFileSpecs,
   normalizedDangerousPaths,
   normalizedAllowDangerousPaths,
+  pipewireSocketName,
 }:
 let
   # The JSON config for the compiled binary
@@ -49,7 +50,7 @@ let
     gpu_shm = sCfg.gui.gpu.shm;
     ssh_enable = sCfg.ssh.enable;
     pulseaudio_enable = sCfg.audio.pulseaudio.enable;
-    pipewire_enable = sCfg.audio.pipewire.enable;
+    pipewire_socket_name = pipewireSocketName;
     fido2_enable = sCfg.fido2.enable;
     video_enable = sCfg.video.enable;
     printing_enable = sCfg.printing.enable;

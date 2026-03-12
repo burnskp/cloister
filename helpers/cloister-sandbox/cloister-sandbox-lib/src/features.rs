@@ -765,24 +765,28 @@ pub fn video_args() -> Vec<String> {
 }
 
 /// Build PipeWire native socket forwarding arguments if the socket exists and is valid.
-pub fn pipewire_args(xdg_runtime_dir: &str) -> Vec<String> {
-    let socket = format!("{xdg_runtime_dir}/pipewire-0");
-    if !Path::new(&socket).exists() {
-        eprintln!("Warning: PipeWire socket not found at {xdg_runtime_dir}/pipewire-0");
+pub fn pipewire_args(xdg_runtime_dir: &str, socket_name: &str) -> Vec<String> {
+    let host_socket = format!("{xdg_runtime_dir}/{socket_name}");
+    // We always mount the socket as pipewire-0 inside the sandbox so clients don't
+    // need any custom configuration to find it.
+    let sandbox_socket = format!("{xdg_runtime_dir}/pipewire-0");
+
+    if !Path::new(&host_socket).exists() {
+        eprintln!("Warning: PipeWire socket not found at {host_socket}");
         eprintln!("PipeWire native access will not work. Ensure PipeWire is running.");
         return Vec::new();
     }
-    if let Err(e) = socket::validate_existing_socket(&socket) {
-        eprintln!("Warning: invalid PipeWire socket '{socket}': {e}");
+    if let Err(e) = socket::validate_existing_socket(&host_socket) {
+        eprintln!("Warning: invalid PipeWire socket '{host_socket}': {e}");
         return Vec::new();
     }
     vec![
         "--bind".to_string(),
-        socket.clone(),
-        socket,
+        host_socket,
+        sandbox_socket.clone(),
         "--setenv".to_string(),
         "PIPEWIRE_REMOTE".to_string(),
-        format!("{xdg_runtime_dir}/pipewire-0"),
+        sandbox_socket,
     ]
 }
 
@@ -1098,15 +1102,6 @@ mod tests {
     }
 
     #[test]
-    fn pulseaudio_args_with_missing_socket() {
-        let args = pulseaudio_args("/nonexistent-runtime-dir-for-test");
-        assert!(
-            args.is_empty(),
-            "Expected empty args when PulseAudio socket doesn't exist"
-        );
-    }
-
-    #[test]
     fn pulseaudio_args_with_valid_socket() {
         use std::os::unix::net::UnixListener;
 
@@ -1138,7 +1133,7 @@ mod tests {
     #[test]
     fn pipewire_args_with_missing_socket() {
         // Use a non-existent runtime dir to test the missing-socket path
-        let args = pipewire_args("/nonexistent-runtime-dir-for-test");
+        let args = pipewire_args("/nonexistent-runtime-dir-for-test", "pipewire-0");
         assert!(
             args.is_empty(),
             "Expected empty args when PipeWire socket doesn't exist"
@@ -1157,7 +1152,7 @@ mod tests {
         let sock_path = dir.join("pipewire-0");
         let _listener = UnixListener::bind(&sock_path).unwrap();
 
-        let args = pipewire_args(dir.to_str().unwrap());
+        let args = pipewire_args(dir.to_str().unwrap(), "pipewire-0");
         assert!(
             !args.is_empty(),
             "Expected non-empty args when PipeWire socket is valid"

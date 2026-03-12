@@ -61,17 +61,20 @@ let
           cloister-wayland-validate = pkgs.callPackage ../../helpers/cloister-wayland-validate { };
           cloister-dbus-validate = pkgs.callPackage ../../helpers/cloister-dbus-validate { };
           cloister-seccomp-validate = pkgs.callPackage ../../helpers/cloister-seccomp-validate { };
+          cloister-pipewire-validate = pkgs.callPackage ../../helpers/cloister-pipewire-validate { };
         in
         [
           cloister-wayland-validate
           cloister-dbus-validate
           cloister-seccomp-validate
+          cloister-pipewire-validate
         ];
 
       validatorCommands = [
         "cloister-wayland-validate"
         "cloister-dbus-validate"
         "cloister-seccomp-validate"
+        "cloister-pipewire-validate"
       ];
 
       sandboxHome =
@@ -914,6 +917,61 @@ let
                 and for applications that use PipeWire directly.
                 Can be enabled alongside audio.pulseaudio for full compatibility.
               '';
+            };
+
+            filters = {
+              enable = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  Enable strict PipeWire filtering via WirePlumber access rules.
+                  When true, a dedicated PipeWire socket is created and only the
+                  specified media classes and capabilities are exposed to the sandbox.
+                  Defaults to audioOut=true and everything else disabled.
+                '';
+              };
+              audioOut = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = ''
+                  Allow playback to audio sinks (media.class: "Audio/Sink").
+                  Only takes effect if filters.enable is true.
+                '';
+              };
+              audioIn = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  Allow recording from audio sources (media.class: "Audio/Source").
+                  Only takes effect if filters.enable is true.
+                '';
+              };
+              videoIn = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  Allow recording from cameras/video sources (media.class: "Video/Source").
+                  Only takes effect if filters.enable is true.
+                '';
+              };
+              control = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  Grant 'w' (write) permissions to allow changing volume and mute state
+                  of visible nodes.
+                  Only takes effect if filters.enable is true.
+                '';
+              };
+              routing = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  Grant 'm' (metadata) permissions to allow changing default system
+                  routing, moving streams, and managing metadata.
+                  Only takes effect if filters.enable is true.
+                '';
+              };
             };
           };
         };

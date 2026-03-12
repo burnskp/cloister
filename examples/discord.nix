@@ -1,8 +1,8 @@
 # Discord sandbox example
 #
-# A sandboxed Discord client with Wayland/X11, audio, GPU, portal-based screen
-# sharing (via PipeWire), and D-Bus policies aligned with the Flatpak default
-# finish-args.
+# A sandboxed Discord client with Wayland/X11, GPU, filtered PipeWire audio
+# (speakers + microphone + camera), and D-Bus policies aligned with the Flatpak
+# default finish-args.
 #
 # Usage:
 #  cl-discord
@@ -20,9 +20,16 @@
     # Display & rendering
     gui.wayland.enable = true;
 
-    # Audio
-    audio.pulseaudio.enable = true;
-    audio.pipewire.enable = true; # portal-based screen sharing
+    # Audio & screen sharing (PipeWire with filtering)
+    audio.pipewire = {
+      enable = true;
+      filters = {
+        enable = true;
+        audioIn = true; # microphone for voice chat
+        videoIn = true; # camera for video calls
+      };
+      # audioOut is true by default
+    };
 
     # D-Bus policies (mirrors Flatpak defaults)
     dbus = {

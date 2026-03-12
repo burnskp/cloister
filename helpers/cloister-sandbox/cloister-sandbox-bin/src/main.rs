@@ -526,8 +526,8 @@ fn run() -> i32 {
     }
 
     // PipeWire
-    if config.pipewire_enable {
-        extra_args.extend(features::pipewire_args(&xdg_runtime_dir));
+    if let Some(socket_name) = &config.pipewire_socket_name {
+        extra_args.extend(features::pipewire_args(&xdg_runtime_dir, socket_name));
     }
 
     // Wayland
@@ -775,7 +775,7 @@ fn requires_xdg_runtime_dir(config: &SandboxConfig) -> bool {
     config.dbus_enable
         || config.wayland_enable
         || config.pulseaudio_enable
-        || config.pipewire_enable
+        || config.pipewire_socket_name.is_some()
         || config.ssh_enable
 }
 
@@ -847,7 +847,7 @@ mod tests {
         dbus_enable: bool,
         wayland_enable: bool,
         pulseaudio_enable: bool,
-        pipewire_enable: bool,
+        pipewire_socket_name: Option<String>,
         ssh_enable: bool,
     ) -> SandboxConfig {
         serde_json::from_value(serde_json::json!({
@@ -864,7 +864,7 @@ mod tests {
             "dbus_enable": dbus_enable,
             "wayland_enable": wayland_enable,
             "pulseaudio_enable": pulseaudio_enable,
-            "pipewire_enable": pipewire_enable,
+            "pipewire_socket_name": pipewire_socket_name,
             "ssh_enable": ssh_enable
         }))
         .expect("valid config")
@@ -924,7 +924,7 @@ mod tests {
 
     #[test]
     fn xdg_runtime_dir_required_when_feature_enabled() {
-        let config = config_with_flags(true, false, false, false, false);
+        let config = config_with_flags(true, false, false, None, false);
         let result = validate_xdg_runtime_dir(&config, "");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(
@@ -934,14 +934,14 @@ mod tests {
 
     #[test]
     fn xdg_runtime_dir_not_required_when_features_disabled() {
-        let config = config_with_flags(false, false, false, false, false);
+        let config = config_with_flags(false, false, false, None, false);
         let result = validate_xdg_runtime_dir(&config, "");
         assert!(result.is_ok());
     }
 
     #[test]
     fn xdg_runtime_dir_present_satisfies_requirement() {
-        let config = config_with_flags(false, true, false, false, false);
+        let config = config_with_flags(false, true, false, None, false);
         let result = validate_xdg_runtime_dir(&config, "/run/user/1000");
         assert!(result.is_ok());
     }

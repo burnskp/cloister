@@ -524,21 +524,42 @@ Passes arbitrary device nodes into the sandbox with `--dev-bind`. Missing device
 
 See the [examples/](../examples/) directory and the [README](../README.md#examples) for complete, importable sandbox configurations.
 
+### PipeWire vs PulseAudio
+
+On modern NixOS the default sound server is PipeWire, which also exposes a PulseAudio-compatible socket. Cloister can forward either socket into the sandbox:
+
+| Option | Protocol | Audio | Screen sharing / cameras | Filtering |
+|--------|----------|-------|--------------------------|-----------|
+| `audio.pipewire.enable` | PipeWire native | Yes | Yes | Yes (`filters.*`) |
+| `audio.pulseaudio.enable` | PulseAudio | Yes | No | No |
+
+**Recommended approach**: use `audio.pipewire` with filtering for most sandboxes. This gives apps the native PipeWire protocol (needed for portal-based screen sharing and camera access) while restricting exactly which devices are visible. Fall back to `audio.pulseaudio` only for legacy apps that specifically require the PulseAudio protocol.
+
+Both can be enabled together if needed — PulseAudio handles audio while PipeWire handles video streams and portals.
+
+### PipeWire
+
+```nix
+cloister.sandboxes.dev.audio.pipewire = {
+  enable = true;
+  filters = {
+    enable = true;
+    audioOut = true;  # speakers (default)
+    # audioIn = true; # microphones
+    # videoIn = true; # webcams (also needs video.enable)
+  };
+};
+```
+
+Forwards the PipeWire native socket (`$XDG_RUNTIME_DIR/pipewire-0`) into the sandbox. When `filters.enable = true`, a dedicated restricted socket is created instead, exposing only the device classes and capabilities you specify. See the [PipeWire filtering guide](pipewire.md) for the full option reference.
+
 ### PulseAudio
 
 ```nix
 cloister.sandboxes.dev.audio.pulseaudio.enable = true;
 ```
 
-Forwards the PulseAudio socket for audio playback and recording. Works with both PulseAudio and PipeWire's PulseAudio compatibility layer.
-
-### PipeWire
-
-```nix
-cloister.sandboxes.dev.audio.pipewire.enable = true;
-```
-
-Forwards the PipeWire native socket (`$XDG_RUNTIME_DIR/pipewire-0`) into the sandbox. Required for portal-based screen sharing (ScreenCast), camera access via PipeWire, and applications that use PipeWire directly. Can be enabled alongside `audio.pulseaudio` for full compatibility - PulseAudio provides audio playback/recording while PipeWire handles video streams and portal integration.
+Forwards the PulseAudio socket for audio playback and recording. Works with both PulseAudio and PipeWire's PulseAudio compatibility layer. Does not support filtering — the sandbox gets unrestricted audio access.
 
 ### Webcam/Camera
 

@@ -29,6 +29,12 @@ let
     ;
   inherit (resolve) resolveConfigEntry;
 
+  # 8-char SHA256 hash of a sandbox's PipeWire filter config, used to
+  # deduplicate sockets and WirePlumber policies across sandboxes.
+  pipewireFilterHash =
+    sCfg:
+    builtins.substring 0 8 (builtins.hashString "sha256" (builtins.toJSON sCfg.audio.pipewire.filters));
+
   # --- D-Bus proxy unit rendering (per-sandbox, socket-activated) ---
 
   dbusPolicyFlags =
@@ -728,6 +734,15 @@ let
         }
       ) sCfg.sandbox.copyFiles;
 
+      pipewireSocketName =
+        if sCfg.audio.pipewire.enable then
+          if sCfg.audio.pipewire.filters.enable then
+            "pipewire-cloister-${pipewireFilterHash sCfg}"
+          else
+            "pipewire-0"
+        else
+          null;
+
       # --- JSON config + package (extracted to _json.nix) ---
       jsonResult = import ./_json.nix {
         inherit
@@ -759,6 +774,7 @@ let
           copyFileSpecs
           normalizedDangerousPaths
           normalizedAllowDangerousPaths
+          pipewireSocketName
           ;
       };
     in
@@ -785,6 +801,179 @@ in
 
     systemd.user.services = dbusServices;
     systemd.user.sockets = dbusSockets;
+
+    xdg.configFile =
+      let
+        pipewireEnabledSandboxes = lib.filterAttrs (
+          _: sCfg: sCfg.audio.pipewire.enable && sCfg.audio.pipewire.filters.enable
+        ) cfg.sandboxes;
+
+        uniqueFilters = builtins.listToAttrs (
+          lib.mapAttrsToList (_: sCfg: {
+            name = pipewireFilterHash sCfg;
+            value = sCfg.audio.pipewire.filters;
+          }) pipewireEnabledSandboxes
+        );
+
+        getPerms =
+          filters: "rx" + lib.optionalString filters.control "w" + lib.optionalString filters.routing "m";
+
+        getMediaClasses =
+          filters:
+          lib.optional filters.audioOut "\"Audio/Sink\""
+          ++ lib.optional filters.audioIn "\"Audio/Source\""
+          ++ lib.optional filters.videoIn "\"Video/Source\"";
+
+        mkPipewireConfig = hash: _: {
+          name = "pipewire/pipewire.conf.d/99-cloister-${hash}.conf";
+          value = {
+            text = ''
+              context.sockets = [
+                  { name = "pipewire-cloister-${hash}" }
+              ]
+
+              context.modules = [
+                  {   name = libpipewire-module-access
+                      args = {
+                          access.socket = {
+                              pipewire-cloister-${hash} = "cloister-${hash}"
+                          }
+                      }
+                  }
+              ]
+            '';
+          };
+        };
+
+        mkWireplumberConfig = hash: _: {
+          name = "wireplumber/wireplumber.conf.d/99-cloister-${hash}.conf";
+          value = {
+            text = ''
+              access.rules = [
+                {
+                  matches = [
+                    {
+                      access = "cloister-${hash}"
+                    }
+                  ]
+                  actions = {
+                    update-props = {
+                      default_permissions = "rx"
+                    }
+                  }
+                }
+              ]
+
+              wireplumber.components = [
+                {
+                  name = access-cloister-${hash}.lua, type = script/lua
+                  provides = custom.access-cloister-${hash}
+                }
+              ]
+
+              wireplumber.profiles = {
+                main = {
+                  custom.access-cloister-${hash} = required
+                }
+              }
+            '';
+          };
+        };
+
+        mkWireplumberLua =
+          hash: filters:
+          let
+            perms = getPerms filters;
+            classes = getMediaClasses filters;
+          in
+          {
+            name = "wireplumber/scripts/access-cloister-${hash}.lua";
+            value = {
+              text = ''
+                local log = Log.open_topic("s-client")
+
+                local cloister_clients = ObjectManager {
+                  Interest {
+                    type = "client",
+                    Constraint { "access", "=", "cloister-${hash}" }
+                  }
+                }
+
+                local media_nodes = ObjectManager {
+              ''
+              + lib.concatStringsSep ",\n                " (
+                map (c: ''
+                  Interest {
+                    type = "node",
+                    Constraint { "media.class", "=", ${c} }
+                  }'') classes
+              )
+              + ''
+                }
+              ''
+              + lib.optionalString filters.routing ''
+
+                local metadata_objects = ObjectManager {
+                  Interest {
+                    type = "metadata"
+                  }
+                }
+              ''
+              + ''
+
+                media_nodes:connect("object-added", function(om, node)
+                  local node_id = node["bound-id"]
+                  for client in cloister_clients:iterate() do
+                    log:info(client, "Granting '${perms}' for node " .. node_id .. " to cloister-${hash} client")
+                    client:update_permissions { [node_id] = "${perms}" }
+                  end
+                end)
+
+                cloister_clients:connect("object-added", function(om, client)
+                  local client_id = client["bound-id"]
+                  log:info(client, "New cloister-${hash} client " .. client_id .. " connected, granting specific ${perms} access")
+                  for node in media_nodes:iterate() do
+                    local node_id = node["bound-id"]
+                    client:update_permissions { [node_id] = "${perms}" }
+                  end
+              ''
+              + lib.optionalString filters.routing ''
+                for metadata in metadata_objects:iterate() do
+                  local metadata_id = metadata["bound-id"]
+                  client:update_permissions { [metadata_id] = "${perms}" }
+                end
+              ''
+              + ''
+                end)
+              ''
+              + lib.optionalString filters.routing ''
+
+                metadata_objects:connect("object-added", function(om, metadata)
+                  local metadata_id = metadata["bound-id"]
+                  for client in cloister_clients:iterate() do
+                    log:info(client, "Granting '${perms}' for metadata " .. metadata_id .. " to cloister-${hash} client")
+                    client:update_permissions { [metadata_id] = "${perms}" }
+                  end
+                end)
+              ''
+              + ''
+
+                media_nodes:activate()
+              ''
+              + lib.optionalString filters.routing ''
+                metadata_objects:activate()
+              ''
+              + ''
+                cloister_clients:activate()
+              '';
+            };
+          };
+
+        pipewireConfigs = lib.mapAttrs' mkPipewireConfig uniqueFilters;
+        wireplumberConfigs = lib.mapAttrs' mkWireplumberConfig uniqueFilters;
+        wireplumberScripts = lib.mapAttrs' mkWireplumberLua uniqueFilters;
+      in
+      pipewireConfigs // wireplumberConfigs // wireplumberScripts;
 
     # Desktop entries for sandboxes with gui.desktopEntry.enable = true
     xdg.desktopEntries =

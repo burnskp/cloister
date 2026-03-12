@@ -40,7 +40,7 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub pulseaudio_enable: bool,
     #[serde(default)]
-    pub pipewire_enable: bool,
+    pub pipewire_socket_name: Option<String>,
     #[serde(default)]
     pub fido2_enable: bool,
     #[serde(default)]
