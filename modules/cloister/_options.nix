@@ -801,7 +801,7 @@ let
           enable = lib.mkOption {
             type = lib.types.bool;
             default = false;
-            description = "Bind git configuration files (.gitconfig, .config/git) read-only into the sandbox. Disable to prevent git credential helper configuration from being visible inside the sandbox.";
+            description = "Bind git configuration files (.gitconfig and .config/git/config) read-only into the sandbox. Disable to prevent git credential helper configuration from being visible inside the sandbox.";
           };
         };
 
@@ -809,7 +809,7 @@ let
           enable = lib.mkOption {
             type = lib.types.bool;
             default = true;
-            description = "Share the host network namespace with the sandbox. When false, the sandbox has no network access.";
+            description = "Share the host network namespace with the sandbox. When false, the sandbox does not share host networking and seccomp also denies new AF_NETLINK sockets.";
           };
 
           namespace = lib.mkOption {
@@ -833,14 +833,36 @@ let
           };
 
           portal = lib.mkOption {
-            type = lib.types.bool;
-            default = false;
-            description = ''
-              Enable xdg-desktop-portal integration. Creates a synthetic .flatpak-info
-              so portals detect the sandbox, mounts the document portal FUSE filesystem,
-              sets GTK_USE_PORTAL=1, and auto-merges required D-Bus portal policies.
-              Requires dbus.enable = true.
-            '';
+            type = lib.types.coercedTo lib.types.bool (value: { enable = value; }) (
+              lib.types.submodule {
+                options = {
+                  enable = lib.mkOption {
+                    type = lib.types.bool;
+                    default = false;
+                    description = ''
+                      Enable xdg-desktop-portal integration. Creates a synthetic
+                      .flatpak-info so portals detect the sandbox, sets
+                      GTK_USE_PORTAL=1, and auto-merges required D-Bus portal
+                      policies. Requires dbus.enable = true.
+                    '';
+                  };
+
+                  documentFUSE.enable = lib.mkOption {
+                    type = lib.types.bool;
+                    default = true;
+                    description = ''
+                      Bind the host xdg-document-portal FUSE mount
+                      ($XDG_RUNTIME_DIR/doc) into /run/flatpak/doc inside the
+                      sandbox. Disable this to keep portal D-Bus integration while
+                      preventing document-portal file access paths from being
+                      mounted.
+                    '';
+                  };
+                };
+              }
+            );
+            default = { };
+            description = "xdg-desktop-portal integration settings.";
           };
 
           policies = {
@@ -1276,13 +1298,15 @@ let
 
         sandbox.extraDirs = lib.mkMerge [
           (lib.mkIf (customShellBinds != [ ]) (lib.mkBefore [ "${sandboxHome}/.config/cl-shell/${name}" ]))
-          (lib.mkIf config.dbus.portal [
-            "/run/flatpak"
-            "/run/flatpak/doc"
-          ])
+          (lib.mkIf config.dbus.portal.enable (
+            [
+              "/run/flatpak"
+            ]
+            ++ lib.optionals config.dbus.portal.documentFUSE.enable [ "/run/flatpak/doc" ]
+          ))
         ];
 
-        dbus.policies = lib.mkIf config.dbus.portal {
+        dbus.policies = lib.mkIf config.dbus.portal.enable {
           call = {
             "org.freedesktop.portal.*" = lib.mkDefault [ "*" ];
           };

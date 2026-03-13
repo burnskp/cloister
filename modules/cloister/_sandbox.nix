@@ -137,7 +137,7 @@ let
         name=dev.cloister.${name}
       '';
 
-      portalRoBinds = lib.optionals sCfg.dbus.portal [
+      portalRoBinds = lib.optionals sCfg.dbus.portal.enable [
         {
           src = "${syntheticFlatpakInfo}";
           dest = "/.flatpak-info";
@@ -145,7 +145,7 @@ let
         }
       ];
 
-      portalRwBinds = lib.optionals sCfg.dbus.portal [
+      portalRwBinds = lib.optionals (sCfg.dbus.portal.enable && sCfg.dbus.portal.documentFUSE.enable) [
         {
           src = "$XDG_RUNTIME_DIR/doc";
           dest = "/run/flatpak/doc";
@@ -187,6 +187,7 @@ let
           ''
             ${cloister-seccomp-filter}/bin/cloister-seccomp-filter \
               --output "$out" \
+              ${lib.optionalString (!sCfg.network.enable) "--deny-netlink"} \
               ${lib.optionalString sCfg.sandbox.seccomp.allowChromiumSandbox "--allow-chromium-sandbox"}
           ''
       );
@@ -338,7 +339,7 @@ let
 
       gitBinds = lib.optionals sCfg.git.enable [
         {
-          src = "$HOME/.config/git";
+          src = "$HOME/.config/git/config";
           dest = null;
           try = true;
         }
@@ -399,7 +400,7 @@ let
       # Keys only — used for override/passthrough assertions.
       dbusEnv = lib.optionalAttrs sCfg.dbus.enable { DBUS_SESSION_BUS_ADDRESS = ""; };
 
-      portalEnv = lib.optionalAttrs sCfg.dbus.portal { GTK_USE_PORTAL = "1"; };
+      portalEnv = lib.optionalAttrs sCfg.dbus.portal.enable { GTK_USE_PORTAL = "1"; };
 
       guiDataPackages = sCfg.gui.dataPackages ++ lib.optionals sCfg.gui.gtk.enable sCfg.gui.gtk.packages;
 
@@ -716,8 +717,8 @@ let
 
       # Feature-generated bind sources are excluded from dangerous path
       # validation: they are intentional binds added by the module, not
-      # user-provided paths. This prevents e.g. git.enable's .config/git
-      # bind from tripping the .config/git/credentials overlap check while
+      # user-provided paths. This prevents e.g. git.enable's explicit config
+      # file binds from being treated as user-provided paths while
       # still catching user-supplied extraBinds that touch the same tree.
       featureBindSrcs = map (b: b.src) (gitBinds ++ dbusBinds);
       bindSources = lib.unique (

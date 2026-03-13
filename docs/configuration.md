@@ -303,7 +303,7 @@ cloister.sandboxes.dev.network.enable = true;   # default - share host network
 cloister.sandboxes.pdf.network.enable = false; # no network access
 ```
 
-When `network.enable` is `true`, the sandbox shares the host network namespace (`--share-net`). When `false`, the sandbox has no network access.
+When `network.enable` is `true`, the sandbox shares the host network namespace (`--share-net`). When `false`, the sandbox does not share host networking and seccomp also denies new `AF_NETLINK` sockets.
 
 ### Network namespace
 
@@ -329,11 +329,11 @@ For localhost namespaces, `cloister-netns.firewall.autoOpenLocalhostPorts = true
 ### Git configuration
 
 ```nix
-cloister.sandboxes.dev.git.enable = true;   # bind .gitconfig and .config/git read-only
+cloister.sandboxes.dev.git.enable = true;   # bind .gitconfig and .config/git/config read-only
 cloister.sandboxes.pdf.git.enable = false; # default - no git config inside this sandbox
 ```
 
-When enabled, `.gitconfig` and `.config/git` are bound read-only. This includes credential helper configuration. Disabled by default to avoid exposing credential helper configuration.
+When enabled, `.gitconfig` and `.config/git/config` are bound read-only. This includes credential helper configuration. Disabled by default to avoid exposing credential helper configuration.
 
 ### Dangerous path detection
 
@@ -725,10 +725,11 @@ See the sections above for usage examples and explanations.
 | `ssh.enable` | bool | `false` | Forward SSH agent socket |
 | `ssh.allowFingerprints` | list of str | `[]` | Restrict visible SSH keys to these fingerprints |
 | `ssh.filterTimeoutSeconds` | unsigned int | `60` | SSH filter read/write timeout; set `0` to disable |
-| `git.enable` | bool | `false` | Bind git config files read-only |
+| `git.enable` | bool | `false` | Bind `.gitconfig` and `.config/git/config` read-only |
 | `dbus.enable` | bool | `false` | Per-sandbox D-Bus proxy |
 | `dbus.log` | bool | `false` | Enable xdg-dbus-proxy logging |
-| `dbus.portal` | bool | `false` | Enable xdg-desktop-portal integration (.flatpak-info, FUSE mount, portal policies) |
+| `dbus.portal.enable` | bool | `false` | Enable xdg-desktop-portal integration (.flatpak-info, portal policies, GTK_USE_PORTAL) |
+| `dbus.portal.documentFUSE.enable` | bool | `true` | Bind the document portal FUSE mount at `/run/flatpak/doc` |
 | `dbus.policies.talk` | list of str | `["org.freedesktop.Notifications"]` | D-Bus TALK allowlist |
 | `dbus.policies.own` | list of str | `[]` | D-Bus OWN allowlist |
 | `dbus.policies.see` | list of str | `[]` | D-Bus SEE allowlist |

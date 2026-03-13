@@ -31,6 +31,34 @@ let
     ];
   };
 
+  portalFuseDisabledConfig = evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.dbus = {
+            enable = true;
+            portal = {
+              enable = true;
+              documentFUSE.enable = false;
+            };
+          };
+        };
+      }
+    ];
+  };
+
+  gitEnableConfig = evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.git.enable = true;
+        };
+      }
+    ];
+  };
+
   pipewireRoutingConfig = evalConfig {
     modules = [
       {
@@ -587,6 +615,11 @@ in
     ];
   }) "test" "/run/flatpak/doc" true;
 
+  portal-fuse-mount-disabled =
+    mkConfigCheck "sandbox-portal-fuse-mount-disabled" portalFuseDisabledConfig "test"
+      "/run/flatpak/doc"
+      false;
+
   portal-gtk-use-portal = mkConfigCheck "sandbox-portal-gtk-use-portal" (evalConfig {
     modules = [
       {
@@ -600,6 +633,11 @@ in
       }
     ];
   }) "test" "GTK_USE_PORTAL" true;
+
+  portal-fuse-disabled-still-has-flatpak-info =
+    mkConfigCheck "sandbox-portal-fuse-disabled-still-has-flatpak-info" portalFuseDisabledConfig "test"
+      "/.flatpak-info"
+      true;
 
   portal-auto-policy = mkCheck "sandbox-portal-auto-policy" (
     let
@@ -1503,9 +1541,9 @@ in
 
   # ── Feature bind-source exclusion tests ─────────────────────────────
 
-  # git.enable excludes its own bind sources ($HOME/.config/git,
+  # git.enable excludes its own bind sources ($HOME/.config/git/config,
   # $HOME/.gitconfig) from bind_sources so the runtime dangerous-path
-  # check won't trip on the .config/git/credentials overlap.  But user-
+  # check won't trip on the .config/git overlap. But user-
   # supplied extraBinds targeting the same tree must still be caught.
   git-enable-still-catches-credentials =
     mkAssertionCheck "sandbox-git-enable-still-catches-credentials"
@@ -1581,6 +1619,20 @@ in
       }
     ];
   }) "test" ''"git_enable":true'' true;
+
+  git-enable-binds-gitconfig =
+    mkConfigCheck "sandbox-git-enable-binds-gitconfig" gitEnableConfig "test" "$HOME/.gitconfig"
+      true;
+
+  git-enable-binds-xdg-git-config =
+    mkConfigCheck "sandbox-git-enable-binds-xdg-git-config" gitEnableConfig "test"
+      "$HOME/.config/git/config"
+      true;
+
+  git-enable-does-not-bind-git-dir =
+    mkConfigCheck "sandbox-git-enable-does-not-bind-git-dir" gitEnableConfig "test"
+      ''"$HOME/.config/git"''
+      false;
 
   git-disable = mkConfigCheck "sandbox-git-disable" (evalConfig {
     modules = [

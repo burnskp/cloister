@@ -209,10 +209,11 @@ All per-sandbox options live under `cloister.sandboxes.<name>.*`. See [Configura
 | | `printing.enable` | bool | `false` | Forward CUPS socket |
 | **SSH** | `ssh.enable` | bool | `false` | Forward SSH agent socket |
 | | `ssh.allowFingerprints` | list of str | `[]` | Restrict visible keys |
-| **Git** | `git.enable` | bool | `false` | Bind git config read-only |
+| **Git** | `git.enable` | bool | `false` | Bind `.gitconfig` and `.config/git/config` read-only |
 | **D-Bus** | `dbus.enable` | bool | `false` | Per-sandbox D-Bus proxy |
 | | `dbus.log` | bool | `false` | Proxy logging |
-| | `dbus.portal` | bool | `false` | xdg-desktop-portal integration |
+| | `dbus.portal.enable` | bool | `false` | xdg-desktop-portal integration |
+| | `dbus.portal.documentFUSE.enable` | bool | `true` | Bind document portal FUSE mount |
 | | `dbus.policies.*` | various | - | Talk/own/see/call/broadcast rules |
 | **Registry** | `registry.commands` | list of str | `[]` | Commands to wrap outside sandbox |
 | | `registry.aliases` | attrsOf str | `{}` | Shell aliases |
@@ -238,3 +239,4 @@ See the [examples/](examples/) directory for complete, importable sandbox config
 - **[evince.nix](examples/evince.nix)** - Network-isolated PDF viewer with desktop entry and MIME type registration
 - **[nixdev.nix](examples/nixdev.nix)** - Nix configuration development with editor, LSP, formatters, and persistent caches
 - **[shell-custom-rc.nix](examples/shell-custom-rc.nix)** - Shell rc subset configuration with per-sandbox zshrc files
+- **[untrusted.nix](examples/untrusted.nix)** - Low-trust sandbox with optional host integrations explicitly disabled

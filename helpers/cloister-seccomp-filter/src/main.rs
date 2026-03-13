@@ -121,6 +121,7 @@ const CHROMIUM_SANDBOX_SYSCALLS: &[&str] = &["chroot", "unshare", "setns"];
 
 fn build_filter(
     allow_chromium_sandbox: bool,
+    deny_netlink: bool,
 ) -> Result<ScmpFilterContext, Box<dyn std::error::Error>> {
     // Default-allow: only explicitly listed syscalls are blocked.
     let mut filter = ScmpFilterContext::new(ScmpAction::Allow)?;
@@ -235,10 +236,14 @@ fn build_filter(
         const AF_INET6: u64 = 10;
         const AF_NETLINK: u64 = 16;
 
-        let allowed_families = [AF_UNSPEC, AF_LOCAL, AF_INET, AF_INET6, AF_NETLINK];
+        let allowed_families: &[u64] = if deny_netlink {
+            &[AF_UNSPEC, AF_LOCAL, AF_INET, AF_INET6]
+        } else {
+            &[AF_UNSPEC, AF_LOCAL, AF_INET, AF_INET6, AF_NETLINK]
+        };
         let mut last_allowed = -1i64;
 
-        for &family in &allowed_families {
+        for &family in allowed_families {
             let family = family as i64;
             for disallowed in (last_allowed + 1)..family {
                 filter.add_rule_conditional(
@@ -319,6 +324,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut output_path: Option<&str> = None;
     let mut allow_chromium_sandbox = false;
+    let mut deny_netlink = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -330,6 +336,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--allow-chromium-sandbox" => {
                 allow_chromium_sandbox = true;
             }
+            "--deny-netlink" => {
+                deny_netlink = true;
+            }
             other => {
                 return Err(format!("unknown argument: {other}").into());
             }
@@ -339,7 +348,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let output_path = output_path.ok_or("--output PATH is required")?;
 
-    let filter = build_filter(allow_chromium_sandbox)?;
+    let filter = build_filter(allow_chromium_sandbox, deny_netlink)?;
     filter.export_bpf(&fs::File::create(output_path)?)?;
 
     Ok(())
@@ -358,23 +367,23 @@ mod tests {
 
     #[test]
     fn default_filter_builds() {
-        let filter = build_filter(false);
+        let filter = build_filter(false, false);
         assert!(filter.is_ok(), "default filter should build without error");
     }
 
     #[test]
     fn chromium_sandbox_filter_builds() {
-        let filter = build_filter(true);
+        let filter = build_filter(true, false);
         assert!(
             filter.is_ok(),
             "allow-chromium-sandbox filter should build without error"
         );
     }
 
-    fn export_filter_bytes(allow_chromium_sandbox: bool) -> Vec<u8> {
+    fn export_filter_bytes(allow_chromium_sandbox: bool, deny_netlink: bool) -> Vec<u8> {
         use std::io::Read;
 
-        let filter = build_filter(allow_chromium_sandbox).unwrap();
+        let filter = build_filter(allow_chromium_sandbox, deny_netlink).unwrap();
         let dir = std::env::temp_dir();
 
         // Use a thread-safe unique ID to avoid parallel test failures
@@ -383,10 +392,10 @@ mod tests {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
 
         let path = dir.join(format!(
-            "seccomp-test-chromium-{}-{}-{}.bpf",
-            allow_chromium_sandbox,
+            "seccomp-test-{}-{}-{}.bpf",
             std::process::id(),
-            id
+            id,
+            allow_chromium_sandbox as u8 + deny_netlink as u8 * 2
         ));
 
         let mut file = fs::File::create(&path).unwrap();
@@ -404,8 +413,8 @@ mod tests {
 
     #[test]
     fn filters_differ_when_chromium_sandbox_toggled() {
-        let buf_default = export_filter_bytes(false);
-        let buf_chromium = export_filter_bytes(true);
+        let buf_default = export_filter_bytes(false, false);
+        let buf_chromium = export_filter_bytes(true, false);
 
         assert_ne!(
             buf_default, buf_chromium,
@@ -415,7 +424,18 @@ mod tests {
 
     #[test]
     fn exported_bpf_is_nonempty() {
-        let buf = export_filter_bytes(false);
+        let buf = export_filter_bytes(false, false);
         assert!(!buf.is_empty(), "exported BPF should be non-empty");
+    }
+
+    #[test]
+    fn filters_differ_when_netlink_is_denied() {
+        let buf_default = export_filter_bytes(false, false);
+        let buf_no_netlink = export_filter_bytes(false, true);
+
+        assert_ne!(
+            buf_default, buf_no_netlink,
+            "default and deny-netlink filters should produce different BPF"
+        );
     }
 }

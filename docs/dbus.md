@@ -141,13 +141,13 @@ Avoid exposing sensitive session services unless you are certain you need them:
 
 ## Portal integration
 
-### What `dbus.portal` enables
+### What `dbus.portal.enable` enables
 
-Setting `dbus.portal = true` on a sandbox configures everything needed for `xdg-desktop-portal` to recognize the sandbox and provide portal services (file pickers, open/save dialogs, screenshot requests, etc.):
+Setting `dbus.portal.enable = true` on a sandbox configures everything needed for `xdg-desktop-portal` to recognize the sandbox and provide portal services (file pickers, open/save dialogs, screenshot requests, etc.):
 
 1. **Synthetic `.flatpak-info`** - A read-only file at `/.flatpak-info` inside the sandbox with `[Application]\nname=dev.cloister.<name>`. The portal daemon reads `/proc/<pid>/root/.flatpak-info` to detect sandboxed clients and activate portal behavior.
 
-1. **Document portal FUSE mount** - Binds `$XDG_RUNTIME_DIR/doc` (host) to `/run/flatpak/doc` (sandbox). This is where `xdg-document-portal` exposes its FUSE filesystem.
+1. **Document portal FUSE mount** - When `dbus.portal.documentFUSE.enable = true` (default), binds `$XDG_RUNTIME_DIR/doc` (host) to `/run/flatpak/doc` (sandbox). This is where `xdg-document-portal` exposes its FUSE filesystem.
 
 1. **Portal D-Bus policies** - Auto-merges `--call=org.freedesktop.portal.*=*` and `--broadcast=org.freedesktop.portal.*=*@/org/freedesktop/portal/*` into the D-Bus proxy. User-specified policies override these defaults.
 
@@ -162,7 +162,7 @@ The `xdg-document-portal` daemon (part of `xdg-desktop-portal`) creates a FUSE f
 1. The app receives a path like `/run/flatpak/doc/DOCID/filename`
 1. File access through this path is proxied by the FUSE daemon using `O_PATH` file descriptors, so the sandboxed app can read/write the file without direct host filesystem access
 
-Inside Flatpak sandboxes (and cloister sandboxes with `dbus.portal = true`), the host path `$XDG_RUNTIME_DIR/doc/` is remapped to `/run/flatpak/doc/`.
+Inside Flatpak sandboxes (and cloister sandboxes with `dbus.portal.enable = true` and document FUSE enabled), the host path `$XDG_RUNTIME_DIR/doc/` is remapped to `/run/flatpak/doc/`.
 
 ### Requirements
 
@@ -173,13 +173,17 @@ Inside Flatpak sandboxes (and cloister sandboxes with `dbus.portal = true`), the
 
 - Portal FUSE paths use opaque document IDs (`/run/flatpak/doc/abc123/file.txt`), not human-readable host paths. Applications see these IDs, not the original file location.
 - The document portal FUSE mount only appears if `xdg-document-portal` is running on the host. If it's not running, the bind uses `--bind-try` and degrades gracefully.
+- If `dbus.portal.documentFUSE.enable = false`, portal D-Bus integration still works, but document portal paths are not mounted into the sandbox.
 
 ### Example
 
 ```nix
 cloister.sandboxes.chromium.dbus = {
   enable = true;
-  portal = true;  # enables .flatpak-info, FUSE mount, portal policies, GTK_USE_PORTAL
+  portal = {
+    enable = true;
+    documentFUSE.enable = true;
+  };
 };
 ```
 

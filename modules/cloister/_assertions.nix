@@ -89,7 +89,7 @@
     message = "cloister.sandboxes.${name}: sandbox.env sets keys managed by dbus.portal and cannot be overridden when portal is enabled: ${lib.concatStringsSep ", " overriddenPortalKeys}";
   }
   {
-    assertion = !sCfg.dbus.portal || sCfg.dbus.enable;
+    assertion = !sCfg.dbus.portal.enable || sCfg.dbus.enable;
     message = "cloister.sandboxes.${name}: dbus.portal requires dbus.enable = true.";
   }
   {

@@ -28,7 +28,7 @@ A BPF seccomp filter blocks dangerous syscalls including:
 - Mount/unmount, pivot_root, chroot, namespace creation via `clone(CLONE_NEW*)`, `unshare`, `setns`, `clone3` (unless `--allow-chromium-sandbox`)
 - `io_uring` (bypasses seccomp on submitted operations)
 - `ioctl(TIOCSTI)` / `ioctl(TIOCLINUX)` (PTY injection attacks)
-- Socket families outside `{AF_UNSPEC, AF_LOCAL, AF_INET, AF_INET6, AF_NETLINK}`
+- Socket families outside `{AF_UNSPEC, AF_LOCAL, AF_INET, AF_INET6, AF_NETLINK}`; `AF_NETLINK` is also denied when `network.enable = false`
 - `prctl(PR_SET_SECUREBITS)` and `prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE)` (capability model manipulation)
 - `ptrace`, `process_vm_readv/writev`, BPF, perf, userfaultfd
 
@@ -81,7 +81,7 @@ Each of these is a deliberate trade-off between security and developer experienc
 | **`nix`, `curl`, `openssh` in default packages** | Core dev toolchain. SSH access is mediated by the fingerprint filter when configured. |
 | **X11 passthrough has no client isolation** | X11's security model allows any client to read any other client's input/output. Prefer Wayland with security context for GUI workloads. |
 | **PulseAudio grants full audio including microphone** | PulseAudio has no per-client restriction mechanism. The socket gives access to both playback and recording. |
-| **Git config bound read-only** | May expose credential helper configuration (e.g., `credential.helper = store`). Actual credential files (`.git-credentials`, `.config/git/credentials`) are blocked by dangerous path detection. |
+| **Git config bound read-only** | May expose credential helper configuration (e.g., `credential.helper = store`). Cloister binds only `.gitconfig` and `.config/git/config`; actual credential files (`.git-credentials`, `.config/git/credentials`) are not mounted and are still blocked by dangerous path detection. |
 | **GPU sysfs paths exposed read-only** | When GPU is enabled, GPU-specific `/sys/dev/char/MAJ:MIN` entries, `/run/opengl-driver`, and auto-detected PCI sysfs device paths are ro-bound. This reveals GPU hardware identifiers (vendor/device IDs) and driver metadata. Required for Mesa/Vulkan to identify and initialize the GPU. All binds use `--ro-bind` (not `--dev-bind`) and are gated on path existence. |
 | **Video device access exposes all V4L2 devices** | When `video.enable` is set, all `/dev/video*` devices are bound into the sandbox. V4L2 has no per-client restriction mechanism - any process with device access can capture video from any connected camera. The sysfs paths exposed also reveal USB/PCI device identifiers. |
 | **CUPS socket grants full print access** | When `printing.enable` is set, the CUPS socket is bound read-only. Any process inside the sandbox can submit print jobs and query printer information. The socket is read-only so the sandbox cannot modify CUPS configuration. |
