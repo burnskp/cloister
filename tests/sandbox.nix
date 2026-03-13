@@ -76,6 +76,24 @@ let
     ];
   };
 
+  pipewireCaptureConfig = evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.audio.pipewire = {
+            enable = true;
+            filters = {
+              enable = true;
+              audioIn = true;
+              videoIn = true;
+            };
+          };
+        };
+      }
+    ];
+  };
+
   getConfigFileText =
     config: prefix:
     let
@@ -88,6 +106,7 @@ let
   pipewireWireplumberConfText = getConfigFileText pipewireFiltersConfig "wireplumber/wireplumber.conf.d/99-cloister-";
 
   pipewireRoutingConfText = getConfigFileText pipewireRoutingConfig "wireplumber/wireplumber.conf.d/99-cloister-";
+  pipewireCaptureWireplumberConfText = getConfigFileText pipewireCaptureConfig "wireplumber/wireplumber.conf.d/99-cloister-";
 in
 {
   # ── Assertion tests (bad config should fire) ──────────────────────────
@@ -1214,7 +1233,9 @@ in
     pkgs.runCommand "check-sandbox-pipewire-filters-explicitly-grant-allowed-objects" { } ''
       lua_path=$(${pkgs.gnugrep}/bin/grep -oP '/nix/store/[^,]+\.lua' ${confFile})
       ${pkgs.gnugrep}/bin/grep -qF 'type = "node"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'type = "factory"' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'for _, media_class in ipairs({ "Audio/Sink" }) do' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'for _, factory_name in ipairs({ "client-node", "adapter" }) do' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'local access = properties["pipewire.access.effective"] or properties["access"]' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'return access == "cloister-2fe5c61b"' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'client:update_permissions({' "$lua_path"
@@ -1223,8 +1244,22 @@ in
       ${pkgs.gnugrep}/bin/grep -qF '[0] = self_permissions' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF '[client_id] = self_permissions' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'permissions[node_id] = "rx"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'permissions[factory_id] = factory_permissions' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'grant(client, factory_id, factory_permissions)' "$lua_path"
       ! ${pkgs.gnugrep}/bin/grep -qF 'grant(client, node_id, "-")' "$lua_path"
+      ! ${pkgs.gnugrep}/bin/grep -qF 'permissions[factory_id] = "rwxm"' "$lua_path"
       ! ${pkgs.gnugrep}/bin/grep -qF 'grant(client, metadata["bound-id"], "-")' "$lua_path"
+      touch $out
+    '';
+
+  pipewire-capture-classes-include-audio-and-video-inputs =
+    let
+      confFile = pkgs.writeText "pipewire-capture-conf" pipewireCaptureWireplumberConfText;
+    in
+    pkgs.runCommand "check-sandbox-pipewire-capture-classes-include-audio-and-video-inputs" { } ''
+      lua_path=$(${pkgs.gnugrep}/bin/grep -oP '/nix/store/[^,]+\.lua' ${confFile})
+      ${pkgs.gnugrep}/bin/grep -qF 'for _, media_class in ipairs({ "Audio/Sink", "Audio/Source", "Video/Source" }) do' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'permissions[node_id] = "rx"' "$lua_path"
       touch $out
     '';
 

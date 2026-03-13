@@ -13,6 +13,8 @@ struct FilterStatus {
     video_in: bool,
     has_write: bool,
     has_metadata_perm: bool,
+    has_client_node_factory: bool,
+    has_adapter_factory: bool,
 }
 
 impl FilterStatus {
@@ -23,6 +25,10 @@ impl FilterStatus {
     fn routing(&self) -> bool {
         self.has_metadata_perm
     }
+
+    fn stream_creation(&self) -> bool {
+        self.has_client_node_factory && self.has_adapter_factory
+    }
 }
 
 struct GlobalInfo {
@@ -31,6 +37,7 @@ struct GlobalInfo {
     permissions: String,
     media_class: Option<String>,
     node_name: Option<String>,
+    factory_name: Option<String>,
 }
 
 fn format_permissions(perm_debug: &str) -> String {
@@ -63,6 +70,9 @@ fn format_globals(globals: &[GlobalInfo]) -> String {
         if let Some(nn) = &g.node_name {
             write!(out, "  node.name={nn}").unwrap();
         }
+        if let Some(fn_) = &g.factory_name {
+            write!(out, "  factory.name={fn_}").unwrap();
+        }
         writeln!(out).unwrap();
     }
     out
@@ -80,6 +90,7 @@ fn validate(status: &FilterStatus) -> String {
     writeln!(out, "  videoIn:   {}", status.video_in).unwrap();
     writeln!(out, "  control:   {}", status.control()).unwrap();
     writeln!(out, "  routing:   {}", status.routing()).unwrap();
+    writeln!(out, "  factories: {}", status.stream_creation()).unwrap();
     out
 }
 
@@ -158,6 +169,7 @@ fn collect_status(
 
             let media_class = global.props.as_ref().and_then(|p| p.get("media.class"));
             let node_name = global.props.as_ref().and_then(|p| p.get("node.name"));
+            let factory_name = global.props.as_ref().and_then(|p| p.get("factory.name"));
 
             {
                 let mut s = status_clone.borrow_mut();
@@ -177,6 +189,14 @@ fn collect_status(
                 if type_str.contains("Metadata") && perm_debug.contains('M') {
                     s.has_metadata_perm = true;
                 }
+
+                if type_str.contains("Factory") {
+                    match factory_name {
+                        Some("client-node") => s.has_client_node_factory = true,
+                        Some("adapter") => s.has_adapter_factory = true,
+                        _ => {}
+                    }
+                }
             }
 
             if verbose {
@@ -186,6 +206,7 @@ fn collect_status(
                     permissions: format_permissions(&perm_debug),
                     media_class: media_class.map(String::from),
                     node_name: node_name.map(String::from),
+                    factory_name: factory_name.map(String::from),
                 });
             }
         })
@@ -281,6 +302,7 @@ mod tests {
         assert!(!s.video_in);
         assert!(!s.control());
         assert!(!s.routing());
+        assert!(!s.stream_creation());
     }
 
     #[test]
@@ -339,6 +361,8 @@ mod tests {
             video_in: true,
             has_write: true,
             has_metadata_perm: true,
+            has_client_node_factory: true,
+            has_adapter_factory: true,
         };
         let output = validate(&s);
         assert!(output.contains("audioOut:  true"));
@@ -346,6 +370,18 @@ mod tests {
         assert!(output.contains("videoIn:   true"));
         assert!(output.contains("control:   true"));
         assert!(output.contains("routing:   true"));
+        assert!(output.contains("factories: true"));
+    }
+
+    #[test]
+    fn stream_creation_requires_both_factories() {
+        let mut s = FilterStatus {
+            has_client_node_factory: true,
+            ..FilterStatus::default()
+        };
+        assert!(!s.stream_creation());
+        s.has_adapter_factory = true;
+        assert!(s.stream_creation());
     }
 
     #[test]
@@ -363,11 +399,26 @@ mod tests {
             permissions: "rwx-".to_string(),
             media_class: Some("Audio/Sink".to_string()),
             node_name: Some("alsa_output".to_string()),
+            factory_name: None,
         }];
         let output = format_globals(&globals);
         assert!(output.contains("1 visible"));
         assert!(output.contains("id=32"));
         assert!(output.contains("media.class=Audio/Sink"));
+    }
+
+    #[test]
+    fn format_globals_includes_factory_names() {
+        let globals = vec![GlobalInfo {
+            id: 7,
+            type_name: "Factory".to_string(),
+            permissions: "r-x-".to_string(),
+            media_class: None,
+            node_name: None,
+            factory_name: Some("client-node".to_string()),
+        }];
+        let output = format_globals(&globals);
+        assert!(output.contains("factory.name=client-node"));
     }
 
     #[test]

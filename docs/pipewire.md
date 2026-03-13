@@ -6,7 +6,7 @@ Enabling **PipeWire filters** (`audio.pipewire.filters.enable = true`) restricts
 
 ## Configuration
 
-With `filters.enable = true`, the sandbox starts with `audioOut` enabled and everything else is opt-in. The policy keeps the client on a link-only baseline and adds explicit grants only for the device classes you enabled:
+With `filters.enable = true`, the sandbox starts with `audioOut` enabled and everything else is opt-in. The policy keeps the client on a link-only baseline, exposes only the configured sink/source classes, and grants the minimum internal PipeWire factories needed to create playback and capture streams:
 
 ```nix
 cloister.sandboxes.zoom = {
@@ -45,7 +45,7 @@ These grant additional WirePlumber permissions on objects the sandbox can alread
 | `control` | `w` (write) | Change volume, mute state of visible nodes |
 | `routing` | `m` (metadata) | Change default devices, move streams |
 
-Hidden targets remain unavailable for discovery. The link-only baseline lets sandbox-created streams connect to the specific sinks or sources you explicitly expose without making the rest of the graph visible.
+Hidden targets remain unavailable for discovery. The link-only baseline lets sandbox-created streams connect to the specific sinks or sources you explicitly expose without making the rest of the graph visible. `audioIn = true` is intended to allow real microphone capture, and `videoIn = true` is intended to allow real camera/video capture once the corresponding device nodes are also available.
 
 With only `filters.enable = true`, the visible graph should be limited to the PipeWire core, the sandbox's own client object, and `Audio/Sink` nodes. Microphones, cameras, metadata, and unrelated clients should stay hidden.
 
@@ -64,4 +64,4 @@ cloister-pipewire-validate -v   # per-object detail
 
 For manual debugging, `wpctl status` shows visible devices and `wpctl set-volume <id> 5%+` can confirm whether `control` is effective.
 
-For a quick policy check, `cloister-pipewire-validate -v` should show only `Audio/Sink` nodes when only `audioOut` is enabled. The summary output should report `audioOut: true` and everything else `false`.
+For a quick policy check, `cloister-pipewire-validate -v` should show only `Audio/Sink` nodes plus the required internal factories when only `audioOut` is enabled. The summary output should report `audioOut: true`, `factories: true`, and the remaining media toggles as `false`.

@@ -905,12 +905,19 @@ in
             perms = getPerms filters;
             classes = getMediaClasses filters;
             allowedClassesLua = lib.concatStringsSep ", " (map builtins.toJSON classes);
+            allowedFactoriesLua = lib.concatStringsSep ", " (
+              map builtins.toJSON [
+                "client-node"
+                "adapter"
+              ]
+            );
           in
           pkgs.writeText "access-cloister-${hash}.lua" (
             ''
               local log = Log.open_topic("s-client")
               local base_permissions = "l"
               local self_permissions = "rx"
+              local factory_permissions = "rx"
 
               local function grant(client, object_id, permissions)
                 client:update_permissions { [object_id] = permissions }
@@ -921,6 +928,11 @@ in
                 allowed_media_classes[media_class] = true
               end
 
+              local allowed_factory_names = {}
+              for _, factory_name in ipairs({ ${allowedFactoriesLua} }) do
+                allowed_factory_names[factory_name] = true
+              end
+
               local function is_allowed_node(node)
                 local properties = node.properties
                 if properties == nil then
@@ -929,6 +941,16 @@ in
 
                 local media_class = properties["media.class"]
                 return media_class ~= nil and allowed_media_classes[media_class] == true
+              end
+
+              local function is_allowed_factory(factory)
+                local properties = factory.properties
+                if properties == nil then
+                  return false
+                end
+
+                local factory_name = properties["factory.name"]
+                return factory_name ~= nil and allowed_factory_names[factory_name] == true
               end
 
               local function is_cloister_client(client)
@@ -950,6 +972,12 @@ in
               local node_objects = ObjectManager {
                 Interest {
                   type = "node"
+                }
+              }
+
+              local factory_objects = ObjectManager {
+                Interest {
+                  type = "factory"
                 }
               }
 
@@ -982,6 +1010,13 @@ in
                   end
                 end
 
+                for factory in factory_objects:iterate() do
+                  if is_allowed_factory(factory) then
+                    local factory_id = factory["bound-id"]
+                    permissions[factory_id] = factory_permissions
+                  end
+                end
+
             ''
             + lib.optionalString filters.routing ''
               for metadata in metadata_objects:iterate() do
@@ -1000,6 +1035,18 @@ in
                     if is_cloister_client(client) then
                       log:info(client, "Granting '${perms}' for node " .. node_id .. " to cloister-${hash} client")
                       grant(client, node_id, "${perms}")
+                    end
+                  end
+                end
+              end)
+
+              factory_objects:connect("object-added", function(om, factory)
+                if is_allowed_factory(factory) then
+                  local factory_id = factory["bound-id"]
+                  for client in cloister_clients:iterate() do
+                    if is_cloister_client(client) then
+                      log:info(client, "Granting '" .. factory_permissions .. "' for factory " .. factory_id .. " to cloister-${hash} client")
+                      grant(client, factory_id, factory_permissions)
                     end
                   end
                 end
@@ -1026,6 +1073,7 @@ in
               end)
 
               node_objects:activate()
+              factory_objects:activate()
             ''
             + lib.optionalString filters.routing ''
               metadata_objects:activate()
