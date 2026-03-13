@@ -362,7 +362,7 @@ in
         };
       }
     ];
-  }) "test" "dbus-proxy-test" true;
+  }) "test" "cloister/dbus/test" true;
 
   dbus-disable = mkConfigCheck "sandbox-dbus-disable" (evalConfig {
     modules = [
@@ -1315,16 +1315,16 @@ in
 
   pipewire-filters =
     mkConfigCheck "sandbox-pipewire-filters" pipewireFiltersConfig "test"
-      ''"pipewire_socket_name":"pipewire-cloister/test"''
+      ''"pipewire_socket_name":"cloister/pipewire/test"''
       true;
 
   pipewire-filters-configures-protocol-native-socket =
     mkCheck "sandbox-pipewire-filters-configures-protocol-native-socket"
       (
         lib.hasInfix "module.protocol-native.args = {" pipewireConfText
-        && lib.hasInfix ''{ name = "pipewire-cloister/test" }'' pipewireConfText
+        && lib.hasInfix ''{ name = "cloister/pipewire/test" }'' pipewireConfText
         && lib.hasInfix "module.access.args = {" pipewireConfText
-        && lib.hasInfix ''pipewire-cloister/test = "cloister-test"'' pipewireConfText
+        && lib.hasInfix ''cloister/pipewire/test = "cloister-test"'' pipewireConfText
         && lib.hasInfix ''pipewire-0-manager = "unrestricted"'' pipewireConfText
       );
 
@@ -1406,10 +1406,10 @@ in
   pipewire-filters-do-not-share-sockets-between-sandboxes =
     mkCheck "sandbox-pipewire-filters-do-not-share-sockets-between-sandboxes"
       (
-        lib.hasInfix ''{ name = "pipewire-cloister/alpha" }'' pipewireSharedConfText
-        && lib.hasInfix ''{ name = "pipewire-cloister/beta" }'' pipewireSharedConfText
-        && lib.hasInfix ''pipewire-cloister/alpha = "cloister-alpha"'' pipewireSharedConfText
-        && lib.hasInfix ''pipewire-cloister/beta = "cloister-beta"'' pipewireSharedConfText
+        lib.hasInfix ''{ name = "cloister/pipewire/alpha" }'' pipewireSharedConfText
+        && lib.hasInfix ''{ name = "cloister/pipewire/beta" }'' pipewireSharedConfText
+        && lib.hasInfix ''cloister/pipewire/alpha = "cloister-alpha"'' pipewireSharedConfText
+        && lib.hasInfix ''cloister/pipewire/beta = "cloister-beta"'' pipewireSharedConfText
         && lib.hasInfix ''access = "cloister-alpha"'' pipewireSharedAlphaWireplumberConfText
         && lib.hasInfix ''access = "cloister-beta"'' pipewireSharedBetaWireplumberConfText
       );
@@ -1417,13 +1417,13 @@ in
   pipewire-filters-alpha-json-uses-unique-socket =
     mkConfigCheck "sandbox-pipewire-filters-alpha-json-uses-unique-socket" pipewireSharedFiltersConfig
       "alpha"
-      ''"pipewire_socket_name":"pipewire-cloister/alpha"''
+      ''"pipewire_socket_name":"cloister/pipewire/alpha"''
       true;
 
   pipewire-filters-beta-json-uses-unique-socket =
     mkConfigCheck "sandbox-pipewire-filters-beta-json-uses-unique-socket" pipewireSharedFiltersConfig
       "beta"
-      ''"pipewire_socket_name":"pipewire-cloister/beta"''
+      ''"pipewire_socket_name":"cloister/pipewire/beta"''
       true;
 
   pipewire-capture-classes-include-audio-and-video-inputs =

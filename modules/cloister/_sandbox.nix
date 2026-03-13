@@ -57,7 +57,7 @@ let
       execArgs = [
         "${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy"
         "unix:path=%t/bus"
-        "%t/dbus-proxy-${name}"
+        "%t/cloister/dbus/${name}"
         "--filter"
       ]
       ++ lib.optional sCfg.dbus.log "--log"
@@ -83,7 +83,7 @@ let
       Description = "Cloister D-Bus proxy socket (${name})";
     };
     Socket = {
-      ListenStream = "%t/dbus-proxy-${name}";
+      ListenStream = "%t/cloister/dbus/${name}";
     };
     Install = {
       WantedBy = [ "sockets.target" ];
@@ -738,7 +738,7 @@ let
 
       pipewireSocketName =
         if sCfg.audio.pipewire.enable then
-          if sCfg.audio.pipewire.filters.enable then "pipewire-cloister/${name}" else "pipewire-0"
+          if sCfg.audio.pipewire.filters.enable then "cloister/pipewire/${name}" else "pipewire-0"
         else
           null;
 
@@ -808,7 +808,9 @@ in
         user = {
           services = dbusServices;
           sockets = dbusSockets;
-          tmpfiles.rules = lib.optional (pipewireFilteredSandboxes != { }) "d %t/pipewire-cloister 0700 - -";
+          tmpfiles.rules =
+            lib.optional (dbusEnabledSandboxes != { }) "d %t/cloister/dbus 0700 - -"
+            ++ lib.optional (pipewireFilteredSandboxes != { }) "d %t/cloister/pipewire 0700 - -";
         };
       };
 
@@ -829,11 +831,11 @@ in
           ++ lib.optional filters.videoIn "Video/Source";
 
         pipewireSocketEntries = lib.concatMapStrings (name: ''
-          { name = "pipewire-cloister/${name}" }
+          { name = "cloister/pipewire/${name}" }
         '') (builtins.attrNames pipewireEnabledSandboxes);
 
         pipewireAccessEntries = lib.concatMapStrings (name: ''
-          pipewire-cloister/${name} = "cloister-${name}"
+          cloister/pipewire/${name} = "cloister-${name}"
         '') (builtins.attrNames pipewireEnabledSandboxes);
 
         pipewireConfigs = lib.optionalAttrs (pipewireEnabledSandboxes != { }) {

@@ -539,7 +539,12 @@ fn run() -> i32 {
             .unwrap_or(false)
         {
             if config.wayland_security_context {
-                let socket = format!("{xdg_runtime_dir}/cloister-wayland-{}", process::id());
+                let wayland_dir = format!("{xdg_runtime_dir}/cloister/wayland");
+                if let Err(e) = std::fs::create_dir_all(&wayland_dir) {
+                    eprintln!("{prefix}: wayland runtime dir: {e}");
+                    process::exit(1);
+                }
+                let socket = format!("{wayland_dir}/{}", process::id());
                 if !wayland::probe() {
                     eprintln!("{prefix}: compositor does not support wp-security-context-v1.");
                     eprintln!(
@@ -556,10 +561,10 @@ fn run() -> i32 {
                         extra_args.extend([
                             "--ro-bind".to_string(),
                             socket.clone(),
-                            format!("{xdg_runtime_dir}/wayland-ds"),
+                            format!("{xdg_runtime_dir}/wayland-1"),
                             "--setenv".to_string(),
                             "WAYLAND_DISPLAY".to_string(),
-                            "wayland-ds".to_string(),
+                            "wayland-1".to_string(),
                         ]);
                         _wayland_keep_alive = Some(fd);
                         wayland_socket_path = Some(socket);

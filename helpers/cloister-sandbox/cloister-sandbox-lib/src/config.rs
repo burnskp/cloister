@@ -122,7 +122,7 @@ pub struct SandboxConfig {
     #[serde(default = "default_true")]
     pub enforce_strict_home_policy: bool,
 
-    /// D-Bus proxy socket name (e.g. "dbus-proxy-<name>")
+    /// D-Bus proxy socket name relative to XDG_RUNTIME_DIR (e.g. "cloister/dbus/<name>")
     #[serde(default)]
     pub dbus_proxy_socket_name: Option<String>,
 }
@@ -285,7 +285,7 @@ mod tests {
             "passthrough_env": ["LANG", "TERM"],
             "disallowed_paths": ["/", "/root"],
             "per_dir_paths": [".cache", ".local/share"],
-            "dbus_proxy_socket_name": "dbus-proxy-dev",
+            "dbus_proxy_socket_name": "cloister/dbus/dev",
         })
         .to_string();
 

@@ -51,7 +51,7 @@ With only `filters.enable = true`, the visible graph should be limited to the Pi
 
 ## Per-sandbox sockets
 
-Filtered PipeWire sockets are scoped per sandbox (for example, `pipewire-cloister/zoom`). Even if two sandboxes use identical filter settings, each gets its own socket and WirePlumber policy so filtered graph visibility stays isolated to that sandbox.
+Filtered PipeWire sockets are scoped per sandbox (for example, `cloister/pipewire/zoom`). Even if two sandboxes use identical filter settings, each gets its own socket and WirePlumber policy so filtered graph visibility stays isolated to that sandbox.
 
 ## Validation
 

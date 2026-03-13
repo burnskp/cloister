@@ -204,7 +204,7 @@ let
     copy_files = copyFileSpecs;
 
     enforce_strict_home_policy = sCfg.sandbox.enforceStrictHomePolicy;
-    dbus_proxy_socket_name = if sCfg.dbus.enable then "dbus-proxy-${name}" else null;
+    dbus_proxy_socket_name = if sCfg.dbus.enable then "cloister/dbus/${name}" else null;
   };
 
   configJsonPath = pkgs.writeText "cloister-config-${name}.json" sandboxConfigJson;

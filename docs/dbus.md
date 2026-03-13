@@ -22,10 +22,10 @@ Each sandbox gets its own socket-activated proxy. The cloister module creates a 
 Both the systemd socket and sandbox must agree on the socket path:
 
 ```
-$XDG_RUNTIME_DIR/dbus-proxy-<name>
+$XDG_RUNTIME_DIR/cloister/dbus/<name>
 ```
 
-This is `%t/dbus-proxy-<name>` in systemd unit notation.
+This is `%t/cloister/dbus/<name>` in systemd unit notation.
 
 ## Setup
 
@@ -42,7 +42,7 @@ cloister.sandboxes.gui = {
 
 Cloister generates a per-sandbox socket-activated systemd user unit:
 
-- Socket: `cloister-dbus-proxy-<name>.socket` (listens on `%t/dbus-proxy-<name>`)
+- Socket: `cloister-dbus-proxy-<name>.socket` (listens on `%t/cloister/dbus/<name>`)
 - Service: `cloister-dbus-proxy-<name>.service` (runs `xdg-dbus-proxy` with your policy)
 
 ## Module integration
