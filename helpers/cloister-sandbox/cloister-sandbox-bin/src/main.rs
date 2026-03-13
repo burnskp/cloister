@@ -688,6 +688,7 @@ fn run() -> i32 {
 
     // --- 11. Spawn bwrap ---
     let is_interactive = env::is_interactive(&command_args, config.default_command.as_deref());
+    let run_cmd = build_session_run_cmd(&config, run_cmd, is_interactive);
     INTERACTIVE_MODE.store(is_interactive, Ordering::Release);
 
     let (mut cmd, _args_fd) = match bwrap::build_bwrap_command(
@@ -789,6 +790,24 @@ fn validate_xdg_runtime_dir(config: &SandboxConfig, xdg_runtime_dir: &str) -> Re
     Ok(())
 }
 
+fn build_session_run_cmd(
+    config: &SandboxConfig,
+    run_cmd: Vec<String>,
+    interactive: bool,
+) -> Vec<String> {
+    let Some(wrapper_path) = &config.pipewire_pulse_wrapper_path else {
+        return run_cmd;
+    };
+
+    let mut wrapped = vec![wrapper_path.clone()];
+    if interactive {
+        wrapped.push("--interactive".to_string());
+    }
+    wrapped.push("--".to_string());
+    wrapped.extend(run_cmd);
+    wrapped
+}
+
 /// Parse --config, --after-netns, and remaining sandbox arguments.
 fn parse_cli_args(args: &[String]) -> (Option<String>, bool, Vec<String>) {
     let mut config_path = None;
@@ -848,6 +867,7 @@ mod tests {
         wayland_enable: bool,
         pulseaudio_enable: bool,
         pipewire_socket_name: Option<String>,
+        pipewire_pulse_wrapper_path: Option<String>,
         ssh_enable: bool,
     ) -> SandboxConfig {
         serde_json::from_value(serde_json::json!({
@@ -865,6 +885,7 @@ mod tests {
             "wayland_enable": wayland_enable,
             "pulseaudio_enable": pulseaudio_enable,
             "pipewire_socket_name": pipewire_socket_name,
+            "pipewire_pulse_wrapper_path": pipewire_pulse_wrapper_path,
             "ssh_enable": ssh_enable
         }))
         .expect("valid config")
@@ -924,7 +945,7 @@ mod tests {
 
     #[test]
     fn xdg_runtime_dir_required_when_feature_enabled() {
-        let config = config_with_flags(true, false, false, None, false);
+        let config = config_with_flags(true, false, false, None, None, false);
         let result = validate_xdg_runtime_dir(&config, "");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(
@@ -934,16 +955,76 @@ mod tests {
 
     #[test]
     fn xdg_runtime_dir_not_required_when_features_disabled() {
-        let config = config_with_flags(false, false, false, None, false);
+        let config = config_with_flags(false, false, false, None, None, false);
         let result = validate_xdg_runtime_dir(&config, "");
         assert!(result.is_ok());
     }
 
     #[test]
     fn xdg_runtime_dir_present_satisfies_requirement() {
-        let config = config_with_flags(false, true, false, None, false);
+        let config = config_with_flags(false, true, false, None, None, false);
         let result = validate_xdg_runtime_dir(&config, "/run/user/1000");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn session_command_uses_wrapper_for_interactive_shells() {
+        let config = config_with_flags(
+            false,
+            false,
+            false,
+            Some("pipewire-0".to_string()),
+            Some("/nix/store/xxx-wrapper".to_string()),
+            false,
+        );
+        let run_cmd = vec!["/nix/store/xxx-zsh/bin/zsh".to_string(), "-i".to_string()];
+
+        assert_eq!(
+            build_session_run_cmd(&config, run_cmd, true),
+            vec![
+                "/nix/store/xxx-wrapper",
+                "--interactive",
+                "--",
+                "/nix/store/xxx-zsh/bin/zsh",
+                "-i",
+            ]
+        );
+    }
+
+    #[test]
+    fn session_command_uses_wrapper_for_noninteractive_commands() {
+        let config = config_with_flags(
+            false,
+            false,
+            false,
+            Some("pipewire-0".to_string()),
+            Some("/nix/store/xxx-wrapper".to_string()),
+            false,
+        );
+        let run_cmd = vec!["firefox".to_string(), "--new-window".to_string()];
+
+        assert_eq!(
+            build_session_run_cmd(&config, run_cmd, false),
+            vec!["/nix/store/xxx-wrapper", "--", "firefox", "--new-window",]
+        );
+    }
+
+    #[test]
+    fn session_command_skips_wrapper_when_not_configured() {
+        let config = config_with_flags(
+            false,
+            false,
+            false,
+            Some("pipewire-0".to_string()),
+            None,
+            false,
+        );
+        let run_cmd = vec!["firefox".to_string()];
+
+        assert_eq!(
+            build_session_run_cmd(&config, run_cmd.clone(), false),
+            run_cmd
+        );
     }
 
     /// Reset signal-handler statics so tests don't interfere with each other.

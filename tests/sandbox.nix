@@ -94,6 +94,15 @@ let
     ];
   };
 
+  getExtraSymlinkTarget =
+    config: link:
+    let
+      matches = builtins.filter (
+        entry: entry.link == link
+      ) config.cloister.sandboxes.test.sandbox.extraSymlinks;
+    in
+    (builtins.head matches).target;
+
   getConfigFileText =
     config: prefix:
     let
@@ -104,6 +113,12 @@ let
 
   pipewireConfText = getConfigFileText pipewireFiltersConfig "pipewire/pipewire.conf.d/99-cloister.conf";
   pipewireWireplumberConfText = getConfigFileText pipewireFiltersConfig "wireplumber/wireplumber.conf.d/99-cloister-";
+  pipewireClientConfText = builtins.readFile (
+    getExtraSymlinkTarget pipewireFiltersConfig "/home/testuser/.config/pipewire/client.conf.d/99-cloister.conf"
+  );
+  pipewirePulseConfText = builtins.readFile (
+    getExtraSymlinkTarget pipewireFiltersConfig "/home/testuser/.config/pipewire/pipewire-pulse.conf"
+  );
 
   pipewireRoutingConfText = getConfigFileText pipewireRoutingConfig "wireplumber/wireplumber.conf.d/99-cloister-";
   pipewireCaptureWireplumberConfText = getConfigFileText pipewireCaptureConfig "wireplumber/wireplumber.conf.d/99-cloister-";
@@ -1197,6 +1212,17 @@ in
     ];
   }) "test" ''"pipewire_socket_name":"pipewire-0"'' true;
 
+  pipewire-pulse-wrapper-enable = mkConfigCheck "sandbox-pipewire-pulse-wrapper-enable" (evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.audio.pipewire.enable = true;
+        };
+      }
+    ];
+  }) "test" ''"pipewire_pulse_wrapper_path":"/nix/store/'' true;
+
   pipewire-disable = mkConfigCheck "sandbox-pipewire-disable" (evalConfig {
     modules = [
       {
@@ -1207,6 +1233,19 @@ in
       }
     ];
   }) "test" ''"pipewire_socket_name":null'' true;
+
+  pipewire-pulse-wrapper-disable = mkConfigCheck "sandbox-pipewire-pulse-wrapper-disable" (evalConfig
+    {
+      modules = [
+        {
+          cloister = {
+            enable = true;
+            sandboxes.test.audio.pipewire.enable = false;
+          };
+        }
+      ];
+    }
+  ) "test" ''"pipewire_pulse_wrapper_path":null'' true;
 
   pipewire-filters =
     mkConfigCheck "sandbox-pipewire-filters" pipewireFiltersConfig "test"
@@ -1221,6 +1260,14 @@ in
         && lib.hasInfix "module.access.args = {" pipewireConfText
         && lib.hasInfix ''pipewire-0-manager = "unrestricted"'' pipewireConfText
       );
+
+  pipewire-client-config-disables-dbus = mkCheck "sandbox-pipewire-client-config-disables-dbus" (
+    lib.hasInfix "support.dbus = false" pipewireClientConfText
+  );
+
+  pipewire-pulse-config-disables-dbus = mkCheck "sandbox-pipewire-pulse-config-disables-dbus" (
+    lib.hasInfix "support.dbus = false" pipewirePulseConfText
+  );
 
   pipewire-filters-baseline-with-link-permission = mkCheck "sandbox-pipewire-filters-baseline-with-link-permission" (
     lib.hasInfix ''default_permissions = "l"'' pipewireWireplumberConfText

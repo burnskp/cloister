@@ -83,9 +83,20 @@ let
         else
           args.config.home.homeDirectory;
 
+      pipewireContextProperties = ''
+        context.properties = {
+            support.dbus = false
+        }
+      '';
+
+      pipewireClientConf = pkgs.writeText "cloister-pipewire-client.conf" ''
+        # Cloister: disable D-Bus-dependent SPA support for sandboxed PipeWire clients
+        ${pipewireContextProperties}
+      '';
+
       pipewirePulseConf = pkgs.writeText "cloister-pipewire-pulse.conf" ''
         # Cloister: pipewire-pulse.conf with module-rt removed for sandbox use
-        context.properties = { }
+        ${pipewireContextProperties}
         context.spa-libs = {
             audio.convert.* = audioconvert/libspa-audioconvert
             support.*       = support/libspa-support
@@ -1388,30 +1399,6 @@ let
         # Computed registry rendering
         registry.rendered = { inherit inside outside; };
 
-        init.text = lib.mkIf config.audio.pipewire.pulseCompat.enable (
-          lib.mkBefore ''
-            # --- cloister: pipewire-pulse bridge ---
-            if [ ! -S "$XDG_RUNTIME_DIR/pulse/native" ]; then
-              mkdir -p "$XDG_RUNTIME_DIR/pulse"
-              pipewire-pulse &
-              _cloister_pw_pulse_pid=$!
-              _cloister_pw_pulse_waited=0
-              while [ ! -S "$XDG_RUNTIME_DIR/pulse/native" ] && [ "$_cloister_pw_pulse_waited" -lt 20 ]; do
-                if ! kill -0 "$_cloister_pw_pulse_pid" 2>/dev/null; then
-                  echo "Warning: pipewire-pulse exited unexpectedly" >&2
-                  break
-                fi
-                sleep 0.1
-                _cloister_pw_pulse_waited=$((_cloister_pw_pulse_waited + 1))
-              done
-              unset _cloister_pw_pulse_pid _cloister_pw_pulse_waited
-            fi
-            if [ -S "$XDG_RUNTIME_DIR/pulse/native" ]; then
-              export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
-            fi
-          ''
-        );
-
         init.rendered = lib.mkDefault (
           lib.concatStringsSep "\n" (
             lib.filter (s: s != "") [
@@ -1433,12 +1420,19 @@ let
             "/etc/alsa"
             "/etc/alsa/conf.d"
           ])
-          (lib.mkIf config.audio.pipewire.pulseCompat.enable [
+          (lib.mkIf config.audio.pipewire.enable [
             "${sandboxHome}/.config/pipewire"
+            "${sandboxHome}/.config/pipewire/client.conf.d"
           ])
         ];
 
         sandbox.extraSymlinks = lib.mkMerge [
+          (lib.mkIf config.audio.pipewire.enable [
+            {
+              target = "${pipewireClientConf}";
+              link = "${sandboxHome}/.config/pipewire/client.conf.d/99-cloister.conf";
+            }
+          ])
           (lib.mkIf config.audio.pipewire.alsa.enable [
             {
               target = "${pkgs.pipewire}/share/alsa/alsa.conf.d/50-pipewire.conf";

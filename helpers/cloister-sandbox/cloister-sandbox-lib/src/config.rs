@@ -42,6 +42,8 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub pipewire_socket_name: Option<String>,
     #[serde(default)]
+    pub pipewire_pulse_wrapper_path: Option<String>,
+    #[serde(default)]
     pub fido2_enable: bool,
     #[serde(default)]
     pub video_enable: bool,
@@ -251,6 +253,7 @@ mod tests {
         assert_eq!(config.name, "test");
         assert!(!config.network_enable);
         assert!(!config.wayland_enable);
+        assert!(config.pipewire_pulse_wrapper_path.is_none());
         assert!(config.enforce_strict_home_policy);
         assert!(config.shell_host_config);
         assert_eq!(config.ssh_filter_timeout_seconds, 60);
@@ -271,6 +274,7 @@ mod tests {
             "ssh_enable": true,
             "ssh_allow_fingerprints": ["SHA256:abc", "SHA256:def"],
             "ssh_filter_timeout_seconds": 30,
+            "pipewire_pulse_wrapper_path": "/nix/store/xxx-wrapper",
             "home_directory": "/home/user",
             "sandbox_home": "/home/ubuntu",
             "anonymize": true,
@@ -291,6 +295,10 @@ mod tests {
         assert!(config.wayland_enable);
         assert!(config.wayland_security_context);
         assert!(config.ssh_filter_enabled());
+        assert_eq!(
+            config.pipewire_pulse_wrapper_path.as_deref(),
+            Some("/nix/store/xxx-wrapper")
+        );
         assert_eq!(config.ssh_allow_fingerprints.len(), 2);
         assert_eq!(config.ssh_filter_timeout_seconds, 30);
         assert!(!config.shell_host_config);
