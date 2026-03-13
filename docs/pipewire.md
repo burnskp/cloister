@@ -6,7 +6,7 @@ Enabling **PipeWire filters** (`audio.pipewire.filters.enable = true`) restricts
 
 ## Configuration
 
-With `filters.enable = true`, the sandbox starts with `audioOut` enabled and everything else is opt-in. The policy keeps the client on a link-only baseline, exposes only the configured sink/source classes, and grants the minimum internal PipeWire factories needed to create playback and capture streams:
+With `filters.enable = true`, the sandbox starts with `audioOut` enabled and everything else is opt-in. The policy keeps the client on a link-only baseline, exposes only the configured sink/source classes, and grants the minimum internal PipeWire objects needed to create playback and capture streams:
 
 ```nix
 cloister.sandboxes.zoom = {
@@ -45,13 +45,13 @@ These grant additional WirePlumber permissions on objects the sandbox can alread
 | `control` | `w` (write) | Change volume, mute state of visible nodes |
 | `routing` | `m` (metadata) | Change default devices, move streams |
 
-Hidden targets remain unavailable for discovery. The link-only baseline lets sandbox-created streams connect to the specific sinks or sources you explicitly expose without making the rest of the graph visible. `audioIn = true` is intended to allow real microphone capture, and `videoIn = true` is intended to allow real camera/video capture once the corresponding device nodes are also available.
+Hidden targets remain unavailable for discovery. The link-only baseline lets sandbox-created streams connect to the specific sinks or sources you explicitly expose without making the rest of the graph visible. Cloister grants read access to PipeWire `Link` objects only for links that touch sandbox-owned stream nodes, so `pipewire-pulse` can observe its own playback/record stream setup without learning about unrelated clients using the same device. `audioIn = true` is intended to allow real microphone capture, and `videoIn = true` is intended to allow real camera/video capture once the corresponding device nodes are also available.
 
-With only `filters.enable = true`, the visible graph should be limited to the PipeWire core, the sandbox's own client object, and `Audio/Sink` nodes. Microphones, cameras, metadata, and unrelated clients should stay hidden.
+With only `filters.enable = true`, the visible graph should be limited to the PipeWire core, the sandbox's own client object, `Audio/Sink` nodes, and only the `Link` objects associated with that sandbox's own streams. Microphones, cameras, metadata, and unrelated clients should stay hidden.
 
-## Deduplication
+## Per-sandbox sockets
 
-The socket name is derived from a hash of the filter config (e.g., `pipewire-cloister-a1b2c3d4`). Sandboxes with identical filter settings share a single socket and WirePlumber policy automatically.
+Filtered PipeWire sockets are scoped per sandbox (for example, `pipewire-cloister/zoom`). Even if two sandboxes use identical filter settings, each gets its own socket and WirePlumber policy so filtered graph visibility stays isolated to that sandbox.
 
 ## Validation
 
@@ -64,4 +64,4 @@ cloister-pipewire-validate -v   # per-object detail
 
 For manual debugging, `wpctl status` shows visible devices and `wpctl set-volume <id> 5%+` can confirm whether `control` is effective.
 
-For a quick policy check, `cloister-pipewire-validate -v` should show only `Audio/Sink` nodes plus the required internal factories when only `audioOut` is enabled. The summary output should report `audioOut: true`, `factories: true`, and the remaining media toggles as `false`.
+For a quick policy check, `cloister-pipewire-validate -v` should show only `Audio/Sink` nodes plus the required internal linking objects (`Link` globals and the `client-node`, `adapter`, and `link-factory` factories) when only `audioOut` is enabled. The summary output should report `audioOut: true`, `factories: true`, and the remaining media toggles as `false`.

@@ -31,6 +31,26 @@ let
     ];
   };
 
+  pipewireSharedFiltersConfig = evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes = {
+            alpha.audio.pipewire = {
+              enable = true;
+              filters.enable = true;
+            };
+            beta.audio.pipewire = {
+              enable = true;
+              filters.enable = true;
+            };
+          };
+        };
+      }
+    ];
+  };
+
   portalFuseDisabledConfig = evalConfig {
     modules = [
       {
@@ -165,6 +185,9 @@ let
 
   pipewireRoutingConfText = getConfigFileText pipewireRoutingConfig "wireplumber/wireplumber.conf.d/99-cloister-";
   pipewireCaptureWireplumberConfText = getConfigFileText pipewireCaptureConfig "wireplumber/wireplumber.conf.d/99-cloister-";
+  pipewireSharedConfText = getConfigFileText pipewireSharedFiltersConfig "pipewire/pipewire.conf.d/99-cloister.conf";
+  pipewireSharedAlphaWireplumberConfText = getConfigFileText pipewireSharedFiltersConfig "wireplumber/wireplumber.conf.d/99-cloister-alpha.conf";
+  pipewireSharedBetaWireplumberConfText = getConfigFileText pipewireSharedFiltersConfig "wireplumber/wireplumber.conf.d/99-cloister-beta.conf";
 in
 {
   # ── Assertion tests (bad config should fire) ──────────────────────────
@@ -1292,15 +1315,16 @@ in
 
   pipewire-filters =
     mkConfigCheck "sandbox-pipewire-filters" pipewireFiltersConfig "test"
-      ''"pipewire_socket_name":"pipewire-cloister-''
+      ''"pipewire_socket_name":"pipewire-cloister/test"''
       true;
 
   pipewire-filters-configures-protocol-native-socket =
     mkCheck "sandbox-pipewire-filters-configures-protocol-native-socket"
       (
         lib.hasInfix "module.protocol-native.args = {" pipewireConfText
-        && lib.hasInfix ''{ name = "pipewire-cloister-'' pipewireConfText
+        && lib.hasInfix ''{ name = "pipewire-cloister/test" }'' pipewireConfText
         && lib.hasInfix "module.access.args = {" pipewireConfText
+        && lib.hasInfix ''pipewire-cloister/test = "cloister-test"'' pipewireConfText
         && lib.hasInfix ''pipewire-0-manager = "unrestricted"'' pipewireConfText
       );
 
@@ -1343,24 +1367,64 @@ in
     pkgs.runCommand "check-sandbox-pipewire-filters-explicitly-grant-allowed-objects" { } ''
       lua_path=$(${pkgs.gnugrep}/bin/grep -oP '/nix/store/[^,]+\.lua' ${confFile})
       ${pkgs.gnugrep}/bin/grep -qF 'type = "node"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'type = "port"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'type = "link"' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'type = "factory"' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'for _, media_class in ipairs({ "Audio/Sink" }) do' "$lua_path"
-      ${pkgs.gnugrep}/bin/grep -qF 'for _, factory_name in ipairs({ "client-node", "adapter" }) do' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'for _, factory_name in ipairs({ "client-node", "adapter", "link-factory" }) do' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'local access = properties["pipewire.access.effective"] or properties["access"]' "$lua_path"
-      ${pkgs.gnugrep}/bin/grep -qF 'return access == "cloister-2fe5c61b"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'local owner_client_id = properties["client.id"]' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'return is_allowed_node(node) or node_matches_client(node, client_id)' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'local function node_id_matches_client(node_id, client_id)' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'local output_node_id = properties["link.output.node"]' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'local input_node_id = properties["link.input.node"]' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'return node_id_matches_client(output_node_id, client_id)' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'or node_id_matches_client(input_node_id, client_id)' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'return access == "cloister-test"' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'client:update_permissions({' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF '["all"] = base_permissions' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'local self_permissions = "rx"' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF '[0] = self_permissions' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF '[client_id] = self_permissions' "$lua_path"
-      ${pkgs.gnugrep}/bin/grep -qF 'permissions[node_id] = "rx"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'permissions[node_id] = "rxl"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'permissions[node_id] = self_permissions' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'permissions[port_id] = "rx"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'permissions[link_id] = "rx"' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'permissions[factory_id] = factory_permissions' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'grant(client, port_id, "rx")' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'grant(client, link_id, "rx")' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'local permissions = is_allowed_node(node) and "rxl" or self_permissions' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'if link_matches_client(link, client_id) then' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'grant(client, factory_id, factory_permissions)' "$lua_path"
       ! ${pkgs.gnugrep}/bin/grep -qF 'grant(client, node_id, "-")' "$lua_path"
+      ! ${pkgs.gnugrep}/bin/grep -qF 'if is_visible_node_for_client(node, client_id) then' "$lua_path"
       ! ${pkgs.gnugrep}/bin/grep -qF 'permissions[factory_id] = "rwxm"' "$lua_path"
       ! ${pkgs.gnugrep}/bin/grep -qF 'grant(client, metadata["bound-id"], "-")' "$lua_path"
       touch $out
     '';
+
+  pipewire-filters-do-not-share-sockets-between-sandboxes =
+    mkCheck "sandbox-pipewire-filters-do-not-share-sockets-between-sandboxes"
+      (
+        lib.hasInfix ''{ name = "pipewire-cloister/alpha" }'' pipewireSharedConfText
+        && lib.hasInfix ''{ name = "pipewire-cloister/beta" }'' pipewireSharedConfText
+        && lib.hasInfix ''pipewire-cloister/alpha = "cloister-alpha"'' pipewireSharedConfText
+        && lib.hasInfix ''pipewire-cloister/beta = "cloister-beta"'' pipewireSharedConfText
+        && lib.hasInfix ''access = "cloister-alpha"'' pipewireSharedAlphaWireplumberConfText
+        && lib.hasInfix ''access = "cloister-beta"'' pipewireSharedBetaWireplumberConfText
+      );
+
+  pipewire-filters-alpha-json-uses-unique-socket =
+    mkConfigCheck "sandbox-pipewire-filters-alpha-json-uses-unique-socket" pipewireSharedFiltersConfig
+      "alpha"
+      ''"pipewire_socket_name":"pipewire-cloister/alpha"''
+      true;
+
+  pipewire-filters-beta-json-uses-unique-socket =
+    mkConfigCheck "sandbox-pipewire-filters-beta-json-uses-unique-socket" pipewireSharedFiltersConfig
+      "beta"
+      ''"pipewire_socket_name":"pipewire-cloister/beta"''
+      true;
 
   pipewire-capture-classes-include-audio-and-video-inputs =
     let
@@ -1369,7 +1433,7 @@ in
     pkgs.runCommand "check-sandbox-pipewire-capture-classes-include-audio-and-video-inputs" { } ''
       lua_path=$(${pkgs.gnugrep}/bin/grep -oP '/nix/store/[^,]+\.lua' ${confFile})
       ${pkgs.gnugrep}/bin/grep -qF 'for _, media_class in ipairs({ "Audio/Sink", "Audio/Source", "Video/Source" }) do' "$lua_path"
-      ${pkgs.gnugrep}/bin/grep -qF 'permissions[node_id] = "rx"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'permissions[node_id] = "rxl"' "$lua_path"
       touch $out
     '';
 

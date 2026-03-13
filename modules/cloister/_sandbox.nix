@@ -29,12 +29,6 @@ let
     ;
   inherit (resolve) resolveConfigEntry;
 
-  # 8-char SHA256 hash of a sandbox's PipeWire filter config, used to
-  # deduplicate sockets and WirePlumber policies across sandboxes.
-  pipewireFilterHash =
-    sCfg:
-    builtins.substring 0 8 (builtins.hashString "sha256" (builtins.toJSON sCfg.audio.pipewire.filters));
-
   # --- D-Bus proxy unit rendering (per-sandbox, socket-activated) ---
 
   dbusPolicyFlags =
@@ -744,10 +738,7 @@ let
 
       pipewireSocketName =
         if sCfg.audio.pipewire.enable then
-          if sCfg.audio.pipewire.filters.enable then
-            "pipewire-cloister-${pipewireFilterHash sCfg}"
-          else
-            "pipewire-0"
+          if sCfg.audio.pipewire.filters.enable then "pipewire-cloister/${name}" else "pipewire-0"
         else
           null;
 
@@ -807,8 +798,19 @@ in
 
     home.packages = lib.mapAttrsToList (_: sb: sb.package) allSandboxes;
 
-    systemd.user.services = dbusServices;
-    systemd.user.sockets = dbusSockets;
+    systemd =
+      let
+        pipewireFilteredSandboxes = lib.filterAttrs (
+          _: sCfg: sCfg.audio.pipewire.enable && sCfg.audio.pipewire.filters.enable
+        ) cfg.sandboxes;
+      in
+      {
+        user = {
+          services = dbusServices;
+          sockets = dbusSockets;
+          tmpfiles.rules = lib.optional (pipewireFilteredSandboxes != { }) "d %t/pipewire-cloister 0700 - -";
+        };
+      };
 
     xdg.configFile =
       let
@@ -816,14 +818,8 @@ in
           _: sCfg: sCfg.audio.pipewire.enable && sCfg.audio.pipewire.filters.enable
         ) cfg.sandboxes;
 
-        uniqueFilters = builtins.listToAttrs (
-          lib.mapAttrsToList (_: sCfg: {
-            name = pipewireFilterHash sCfg;
-            value = sCfg.audio.pipewire.filters;
-          }) pipewireEnabledSandboxes
-        );
-
-        getPerms =
+        getNodePerms = filters: "rxl" + lib.optionalString filters.control "w";
+        getObjectPerms =
           filters: "rx" + lib.optionalString filters.control "w" + lib.optionalString filters.routing "m";
 
         getMediaClasses =
@@ -832,15 +828,15 @@ in
           ++ lib.optional filters.audioIn "Audio/Source"
           ++ lib.optional filters.videoIn "Video/Source";
 
-        pipewireSocketEntries = lib.concatMapStrings (hash: ''
-          { name = "pipewire-cloister-${hash}" }
-        '') (builtins.attrNames uniqueFilters);
+        pipewireSocketEntries = lib.concatMapStrings (name: ''
+          { name = "pipewire-cloister/${name}" }
+        '') (builtins.attrNames pipewireEnabledSandboxes);
 
-        pipewireAccessEntries = lib.concatMapStrings (hash: ''
-          pipewire-cloister-${hash} = "cloister-${hash}"
-        '') (builtins.attrNames uniqueFilters);
+        pipewireAccessEntries = lib.concatMapStrings (name: ''
+          pipewire-cloister/${name} = "cloister-${name}"
+        '') (builtins.attrNames pipewireEnabledSandboxes);
 
-        pipewireConfigs = lib.optionalAttrs (uniqueFilters != { }) {
+        pipewireConfigs = lib.optionalAttrs (pipewireEnabledSandboxes != { }) {
           "pipewire/pipewire.conf.d/99-cloister.conf" = {
             text = ''
               module.protocol-native.args = {
@@ -860,19 +856,19 @@ in
         };
 
         mkWireplumberConfig =
-          hash: filters:
+          name: filters:
           let
-            luaScript = mkWireplumberLuaScript hash filters;
+            luaScript = mkWireplumberLuaScript name filters;
           in
           {
-            name = "wireplumber/wireplumber.conf.d/99-cloister-${hash}.conf";
+            name = "wireplumber/wireplumber.conf.d/99-cloister-${name}.conf";
             value = {
               text = ''
                 access.rules = [
                   {
                     matches = [
                       {
-                        access = "cloister-${hash}"
+                        access = "cloister-${name}"
                       }
                     ]
                     actions = {
@@ -886,13 +882,13 @@ in
                 wireplumber.components = [
                   {
                     name = ${luaScript}, type = script/lua
-                    provides = custom.access-cloister-${hash}
+                    provides = custom.access-cloister-${name}
                   }
                 ]
 
                 wireplumber.profiles = {
                   main = {
-                    custom.access-cloister-${hash} = required
+                    custom.access-cloister-${name} = required
                   }
                 }
               '';
@@ -900,19 +896,21 @@ in
           };
 
         mkWireplumberLuaScript =
-          hash: filters:
+          name: filters:
           let
-            perms = getPerms filters;
+            nodePerms = getNodePerms filters;
+            objectPerms = getObjectPerms filters;
             classes = getMediaClasses filters;
             allowedClassesLua = lib.concatStringsSep ", " (map builtins.toJSON classes);
             allowedFactoriesLua = lib.concatStringsSep ", " (
               map builtins.toJSON [
                 "client-node"
                 "adapter"
+                "link-factory"
               ]
             );
           in
-          pkgs.writeText "access-cloister-${hash}.lua" (
+          pkgs.writeText "access-cloister-${name}.lua" (
             ''
               local log = Log.open_topic("s-client")
               local base_permissions = "l"
@@ -933,6 +931,10 @@ in
                 allowed_factory_names[factory_name] = true
               end
 
+              local node_objects
+              local port_objects
+              local link_objects
+
               local function is_allowed_node(node)
                 local properties = node.properties
                 if properties == nil then
@@ -941,6 +943,66 @@ in
 
                 local media_class = properties["media.class"]
                 return media_class ~= nil and allowed_media_classes[media_class] == true
+              end
+
+              local function node_matches_client(node, client_id)
+                local properties = node.properties
+                if properties == nil then
+                  return false
+                end
+
+                local owner_client_id = properties["client.id"]
+                return owner_client_id ~= nil and tostring(owner_client_id) == tostring(client_id)
+              end
+
+              local function is_visible_node_for_client(node, client_id)
+                return is_allowed_node(node) or node_matches_client(node, client_id)
+              end
+
+              local function node_id_matches_client(node_id, client_id)
+                for node in node_objects:iterate() do
+                  if node_matches_client(node, client_id) and tostring(node["bound-id"]) == tostring(node_id) then
+                    return true
+                  end
+                end
+
+                return false
+              end
+
+              local function port_matches_client(port, client_id)
+                local properties = port.properties
+                if properties == nil then
+                  return false
+                end
+
+                local port_node_id = properties["node.id"]
+                if port_node_id == nil then
+                  return false
+                end
+
+                for node in node_objects:iterate() do
+                  if is_visible_node_for_client(node, client_id) and tostring(node["bound-id"]) == tostring(port_node_id) then
+                    return true
+                  end
+                end
+
+                return false
+              end
+
+              local function link_matches_client(link, client_id)
+                local properties = link.properties
+                if properties == nil then
+                  return false
+                end
+
+                local output_node_id = properties["link.output.node"]
+                local input_node_id = properties["link.input.node"]
+                if output_node_id == nil or input_node_id == nil then
+                  return false
+                end
+
+                return node_id_matches_client(output_node_id, client_id)
+                  or node_id_matches_client(input_node_id, client_id)
               end
 
               local function is_allowed_factory(factory)
@@ -960,7 +1022,7 @@ in
                 end
 
                 local access = properties["pipewire.access.effective"] or properties["access"]
-                return access == "cloister-${hash}"
+                return access == "cloister-${name}"
               end
 
               local cloister_clients = ObjectManager {
@@ -969,9 +1031,21 @@ in
                 }
               }
 
-              local node_objects = ObjectManager {
+              node_objects = ObjectManager {
                 Interest {
                   type = "node"
+                }
+              }
+
+              port_objects = ObjectManager {
+                Interest {
+                  type = "port"
+                }
+              }
+
+              link_objects = ObjectManager {
+                Interest {
+                  type = "link"
                 }
               }
 
@@ -993,7 +1067,7 @@ in
 
               local function sync_client_permissions(client)
                 local client_id = client["bound-id"]
-                log:info(client, "Syncing cloister-${hash} client " .. client_id .. " permissions")
+                log:info(client, "Syncing cloister-${name} client " .. client_id .. " permissions")
                 client:update_permissions({
                   ["all"] = base_permissions,
                 })
@@ -1004,9 +1078,27 @@ in
                 }
 
                 for node in node_objects:iterate() do
-                  if is_allowed_node(node) then
+                  if is_visible_node_for_client(node, client_id) then
                     local node_id = node["bound-id"]
-                    permissions[node_id] = "${perms}"
+                    if is_allowed_node(node) then
+                      permissions[node_id] = "${nodePerms}"
+                    else
+                      permissions[node_id] = self_permissions
+                    end
+                  end
+                end
+
+                for port in port_objects:iterate() do
+                  if port_matches_client(port, client_id) then
+                    local port_id = port["bound-id"]
+                    permissions[port_id] = "rx"
+                  end
+                end
+
+                for link in link_objects:iterate() do
+                  if link_matches_client(link, client_id) then
+                    local link_id = link["bound-id"]
+                    permissions[link_id] = "rx"
                   end
                 end
 
@@ -1021,7 +1113,7 @@ in
             + lib.optionalString filters.routing ''
               for metadata in metadata_objects:iterate() do
                 local metadata_id = metadata["bound-id"]
-                permissions[metadata_id] = "${perms}"
+                permissions[metadata_id] = "${objectPerms}"
               end
             ''
             + ''
@@ -1029,12 +1121,40 @@ in
               end
 
               node_objects:connect("object-added", function(om, node)
-                if is_allowed_node(node) then
-                  local node_id = node["bound-id"]
-                  for client in cloister_clients:iterate() do
-                    if is_cloister_client(client) then
-                      log:info(client, "Granting '${perms}' for node " .. node_id .. " to cloister-${hash} client")
-                      grant(client, node_id, "${perms}")
+                local node_id = node["bound-id"]
+                for client in cloister_clients:iterate() do
+                  if is_cloister_client(client) then
+                    local client_id = client["bound-id"]
+                    if is_visible_node_for_client(node, client_id) then
+                      local permissions = is_allowed_node(node) and "${nodePerms}" or self_permissions
+                      log:info(client, "Granting '" .. permissions .. "' for node " .. node_id .. " to cloister-${name} client")
+                      grant(client, node_id, permissions)
+                    end
+                  end
+                end
+              end)
+
+              port_objects:connect("object-added", function(om, port)
+                local port_id = port["bound-id"]
+                for client in cloister_clients:iterate() do
+                  if is_cloister_client(client) then
+                    local client_id = client["bound-id"]
+                    if port_matches_client(port, client_id) then
+                      log:info(client, "Granting 'rx' for port " .. port_id .. " to cloister-${name} client")
+                      grant(client, port_id, "rx")
+                    end
+                  end
+                end
+              end)
+
+              link_objects:connect("object-added", function(om, link)
+                local link_id = link["bound-id"]
+                for client in cloister_clients:iterate() do
+                  if is_cloister_client(client) then
+                    local client_id = client["bound-id"]
+                    if link_matches_client(link, client_id) then
+                      log:info(client, "Granting 'rx' for link " .. link_id .. " to cloister-${name} client")
+                      grant(client, link_id, "rx")
                     end
                   end
                 end
@@ -1045,7 +1165,7 @@ in
                   local factory_id = factory["bound-id"]
                   for client in cloister_clients:iterate() do
                     if is_cloister_client(client) then
-                      log:info(client, "Granting '" .. factory_permissions .. "' for factory " .. factory_id .. " to cloister-${hash} client")
+                      log:info(client, "Granting '" .. factory_permissions .. "' for factory " .. factory_id .. " to cloister-${name} client")
                       grant(client, factory_id, factory_permissions)
                     end
                   end
@@ -1058,8 +1178,8 @@ in
                 local metadata_id = metadata["bound-id"]
                 for client in cloister_clients:iterate() do
                   if is_cloister_client(client) then
-                    log:info(client, "Granting '${perms}' for metadata " .. metadata_id .. " to cloister-${hash} client")
-                    grant(client, metadata_id, "${perms}")
+                    log:info(client, "Granting '${objectPerms}' for metadata " .. metadata_id .. " to cloister-${name} client")
+                    grant(client, metadata_id, "${objectPerms}")
                   end
                 end
               end)
@@ -1073,6 +1193,8 @@ in
               end)
 
               node_objects:activate()
+              port_objects:activate()
+              link_objects:activate()
               factory_objects:activate()
             ''
             + lib.optionalString filters.routing ''
@@ -1082,7 +1204,9 @@ in
               cloister_clients:activate()
             ''
           );
-        wireplumberConfigs = lib.mapAttrs' mkWireplumberConfig uniqueFilters;
+        wireplumberConfigs = lib.mapAttrs' (
+          name: sCfg: mkWireplumberConfig name sCfg.audio.pipewire.filters
+        ) pipewireEnabledSandboxes;
       in
       pipewireConfigs // wireplumberConfigs;
 

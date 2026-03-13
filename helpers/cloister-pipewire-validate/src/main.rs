@@ -12,9 +12,9 @@ struct FilterStatus {
     audio_in: bool,
     video_in: bool,
     has_write: bool,
-    has_metadata_perm: bool,
     has_client_node_factory: bool,
     has_adapter_factory: bool,
+    has_link_factory: bool,
 }
 
 impl FilterStatus {
@@ -22,12 +22,8 @@ impl FilterStatus {
         self.has_write
     }
 
-    fn routing(&self) -> bool {
-        self.has_metadata_perm
-    }
-
     fn stream_creation(&self) -> bool {
-        self.has_client_node_factory && self.has_adapter_factory
+        self.has_client_node_factory && self.has_adapter_factory && self.has_link_factory
     }
 }
 
@@ -89,7 +85,6 @@ fn validate(status: &FilterStatus) -> String {
     writeln!(out, "  audioIn:   {}", status.audio_in).unwrap();
     writeln!(out, "  videoIn:   {}", status.video_in).unwrap();
     writeln!(out, "  control:   {}", status.control()).unwrap();
-    writeln!(out, "  routing:   {}", status.routing()).unwrap();
     writeln!(out, "  factories: {}", status.stream_creation()).unwrap();
     out
 }
@@ -186,14 +181,11 @@ fn collect_status(
                     }
                 }
 
-                if type_str.contains("Metadata") && perm_debug.contains('M') {
-                    s.has_metadata_perm = true;
-                }
-
                 if type_str.contains("Factory") {
                     match factory_name {
                         Some("client-node") => s.has_client_node_factory = true,
                         Some("adapter") => s.has_adapter_factory = true,
+                        Some("link-factory") => s.has_link_factory = true,
                         _ => {}
                     }
                 }
@@ -301,7 +293,6 @@ mod tests {
         assert!(!s.audio_in);
         assert!(!s.video_in);
         assert!(!s.control());
-        assert!(!s.routing());
         assert!(!s.stream_creation());
     }
 
@@ -311,20 +302,6 @@ mod tests {
         assert!(!s.control());
         s.has_write = true;
         assert!(s.control());
-    }
-
-    #[test]
-    fn routing_from_metadata_permission() {
-        let mut s = FilterStatus::default();
-        assert!(!s.routing());
-        s.has_metadata_perm = true;
-        assert!(s.routing());
-    }
-
-    #[test]
-    fn routing_not_enabled_by_metadata_visibility_alone() {
-        let s = FilterStatus::default();
-        assert!(!s.routing());
     }
 
     #[test]
@@ -360,16 +337,15 @@ mod tests {
             audio_in: true,
             video_in: true,
             has_write: true,
-            has_metadata_perm: true,
             has_client_node_factory: true,
             has_adapter_factory: true,
+            has_link_factory: true,
         };
         let output = validate(&s);
         assert!(output.contains("audioOut:  true"));
         assert!(output.contains("audioIn:   true"));
         assert!(output.contains("videoIn:   true"));
         assert!(output.contains("control:   true"));
-        assert!(output.contains("routing:   true"));
         assert!(output.contains("factories: true"));
     }
 
@@ -381,6 +357,8 @@ mod tests {
         };
         assert!(!s.stream_creation());
         s.has_adapter_factory = true;
+        assert!(!s.stream_creation());
+        s.has_link_factory = true;
         assert!(s.stream_creation());
     }
 

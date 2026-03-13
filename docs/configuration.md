@@ -534,7 +534,7 @@ On modern NixOS the default sound server is PipeWire, which also exposes a Pulse
 | `audio.pipewire.pulseCompat.enable` | PipeWire + PulseAudio bridge | Yes | Yes | Yes (`filters.*`) |
 | `audio.pulseaudio.enable` | PulseAudio | Yes | No | No |
 
-**Recommended approach**: use `audio.pipewire` with filtering for most sandboxes. This gives apps the native PipeWire protocol (needed for portal-based screen sharing and camera access) while restricting exactly which devices are visible. The `pulseCompat` bridge (enabled by default with PipeWire) runs `pipewire-pulse` inside the sandbox so that apps using `libpulse` (Firefox, Chromium, Electron apps, mpv, VLC, etc.) work transparently — all traffic still flows through the filtered PipeWire socket, and filtered mode now preserves the internal PipeWire factories needed for playback, microphone capture, and camera/video capture.
+**Recommended approach**: use `audio.pipewire` with filtering for most sandboxes. This gives apps the native PipeWire protocol (needed for portal-based screen sharing and camera access) while restricting exactly which devices are visible. The `pulseCompat` bridge (enabled by default with PipeWire) runs `pipewire-pulse` inside the sandbox so that apps using `libpulse` (Firefox, Chromium, Electron apps, mpv, VLC, etc.) work transparently — all traffic still flows through the filtered PipeWire socket, and filtered mode now preserves the internal PipeWire factories needed for playback, microphone capture, and camera/video capture, including link creation for Pulse-compatible streams.
 
 ALSA compatibility (`alsa.enable`) is opt-in and only needed for software that speaks raw ALSA (e.g. some games, Wine, JACK bridges). Most applications use PulseAudio or PipeWire natively.
 
