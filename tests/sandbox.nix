@@ -94,6 +94,37 @@ let
     ];
   };
 
+  pipewireDbusDisabledConfig = evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test.audio.pipewire = {
+            enable = true;
+            dbus.enable = false;
+          };
+        };
+      }
+    ];
+  };
+
+  pipewireDbusEnabledConfig = evalConfig {
+    modules = [
+      {
+        cloister = {
+          enable = true;
+          sandboxes.test = {
+            dbus.enable = true;
+            audio.pipewire = {
+              enable = true;
+              dbus.enable = true;
+            };
+          };
+        };
+      }
+    ];
+  };
+
   getExtraSymlinkTarget =
     config: link:
     let
@@ -118,6 +149,18 @@ let
   );
   pipewirePulseConfText = builtins.readFile (
     getExtraSymlinkTarget pipewireFiltersConfig "/home/testuser/.config/pipewire/pipewire-pulse.conf"
+  );
+  pipewireDbusDisabledClientConfText = builtins.readFile (
+    getExtraSymlinkTarget pipewireDbusDisabledConfig "/home/testuser/.config/pipewire/client.conf.d/99-cloister.conf"
+  );
+  pipewireDbusDisabledPulseConfText = builtins.readFile (
+    getExtraSymlinkTarget pipewireDbusDisabledConfig "/home/testuser/.config/pipewire/pipewire-pulse.conf"
+  );
+  pipewireDbusEnabledClientConfText = builtins.readFile (
+    getExtraSymlinkTarget pipewireDbusEnabledConfig "/home/testuser/.config/pipewire/client.conf.d/99-cloister.conf"
+  );
+  pipewireDbusEnabledPulseConfText = builtins.readFile (
+    getExtraSymlinkTarget pipewireDbusEnabledConfig "/home/testuser/.config/pipewire/pipewire-pulse.conf"
   );
 
   pipewireRoutingConfText = getConfigFileText pipewireRoutingConfig "wireplumber/wireplumber.conf.d/99-cloister-";
@@ -1261,13 +1304,33 @@ in
         && lib.hasInfix ''pipewire-0-manager = "unrestricted"'' pipewireConfText
       );
 
-  pipewire-client-config-disables-dbus = mkCheck "sandbox-pipewire-client-config-disables-dbus" (
+  pipewire-client-config-disables-dbus-when-sandbox-dbus-disabled = mkCheck "sandbox-pipewire-client-config-disables-dbus-when-sandbox-dbus-disabled" (
     lib.hasInfix "support.dbus = false" pipewireClientConfText
   );
 
-  pipewire-pulse-config-disables-dbus = mkCheck "sandbox-pipewire-pulse-config-disables-dbus" (
+  pipewire-client-config-disables-dbus-when-pipewire-dbus-disabled = mkCheck "sandbox-pipewire-client-config-disables-dbus-when-pipewire-dbus-disabled" (
+    lib.hasInfix "support.dbus = false" pipewireDbusDisabledClientConfText
+  );
+
+  pipewire-client-config-keeps-dbus-when-enabled =
+    mkCheck "sandbox-pipewire-client-config-keeps-dbus-when-enabled"
+      (!lib.hasInfix "support.dbus = false" pipewireDbusEnabledClientConfText);
+
+  pipewire-pulse-config-disables-dbus-when-sandbox-dbus-disabled = mkCheck "sandbox-pipewire-pulse-config-disables-dbus-when-sandbox-dbus-disabled" (
     lib.hasInfix "support.dbus = false" pipewirePulseConfText
   );
+
+  pipewire-pulse-config-disables-dbus-when-pipewire-dbus-disabled = mkCheck "sandbox-pipewire-pulse-config-disables-dbus-when-pipewire-dbus-disabled" (
+    lib.hasInfix "support.dbus = false" pipewireDbusDisabledPulseConfText
+  );
+
+  pipewire-pulse-config-keeps-dbus-when-enabled =
+    mkCheck "sandbox-pipewire-pulse-config-keeps-dbus-when-enabled"
+      (!lib.hasInfix "support.dbus = false" pipewireDbusEnabledPulseConfText);
+
+  pipewire-pulse-config-still-removes-module-rt =
+    mkCheck "sandbox-pipewire-pulse-config-still-removes-module-rt"
+      (!lib.hasInfix "libpipewire-module-rt" pipewirePulseConfText);
 
   pipewire-filters-baseline-with-link-permission = mkCheck "sandbox-pipewire-filters-baseline-with-link-permission" (
     lib.hasInfix ''default_permissions = "l"'' pipewireWireplumberConfText

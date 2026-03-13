@@ -83,11 +83,17 @@ let
         else
           args.config.home.homeDirectory;
 
-      pipewireContextProperties = ''
-        context.properties = {
-            support.dbus = false
-        }
-      '';
+      pipewireDbusEnabled = config.dbus.enable && config.audio.pipewire.dbus.enable;
+
+      pipewireContextProperties =
+        if pipewireDbusEnabled then
+          ""
+        else
+          ''
+            context.properties = {
+                support.dbus = false
+            }
+          '';
 
       pipewireClientConf = pkgs.writeText "cloister-pipewire-client.conf" ''
         # Cloister: disable D-Bus-dependent SPA support for sandboxed PipeWire clients
@@ -1078,6 +1084,18 @@ let
                   Most applications use PulseAudio or PipeWire natively, so this is
                   only needed for software that speaks raw ALSA (e.g. some games,
                   Wine, JACK bridges).
+                '';
+              };
+            };
+
+            dbus = {
+              enable = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = ''
+                  Allow sandboxed PipeWire clients to use D-Bus support when a
+                  filtered session bus is available via dbus.enable. When false,
+                  sandboxed PipeWire and pipewire-pulse force support.dbus = false.
                 '';
               };
             };
