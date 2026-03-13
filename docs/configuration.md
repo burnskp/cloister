@@ -531,17 +531,21 @@ On modern NixOS the default sound server is PipeWire, which also exposes a Pulse
 | Option | Protocol | Audio | Screen sharing / cameras | Filtering |
 |--------|----------|-------|--------------------------|-----------|
 | `audio.pipewire.enable` | PipeWire native | Yes | Yes | Yes (`filters.*`) |
+| `audio.pipewire.pulseCompat.enable` | PipeWire + PulseAudio bridge | Yes | Yes | Yes (`filters.*`) |
 | `audio.pulseaudio.enable` | PulseAudio | Yes | No | No |
 
-**Recommended approach**: use `audio.pipewire` with filtering for most sandboxes. This gives apps the native PipeWire protocol (needed for portal-based screen sharing and camera access) while restricting exactly which devices are visible. Fall back to `audio.pulseaudio` only for legacy apps that specifically require the PulseAudio protocol.
+**Recommended approach**: use `audio.pipewire` with filtering for most sandboxes. This gives apps the native PipeWire protocol (needed for portal-based screen sharing and camera access) while restricting exactly which devices are visible. The `pulseCompat` bridge (enabled by default with PipeWire) runs `pipewire-pulse` inside the sandbox so that apps using `libpulse` (Firefox, Chromium, Electron apps, mpv, VLC, etc.) work transparently — all traffic still flows through the filtered PipeWire socket, and filtered mode now preserves the internal PipeWire factories needed for playback, microphone capture, and camera/video capture.
 
-Both can be enabled together if needed — PulseAudio handles audio while PipeWire handles video streams and portals.
+ALSA compatibility (`alsa.enable`) is opt-in and only needed for software that speaks raw ALSA (e.g. some games, Wine, JACK bridges). Most applications use PulseAudio or PipeWire natively.
+
+Fall back to `audio.pulseaudio` only for sandboxes that need direct host PulseAudio socket forwarding without PipeWire. Note that `pulseCompat` and `pulseaudio` are mutually exclusive.
 
 ### PipeWire
 
 ```nix
 cloister.sandboxes.dev.audio.pipewire = {
   enable = true;
+  # alsa.enable = true;  # only needed for raw-ALSA software (games, Wine)
   filters = {
     enable = true;
     audioOut = true;  # speakers (default)
@@ -551,7 +555,7 @@ cloister.sandboxes.dev.audio.pipewire = {
 };
 ```
 
-Forwards the PipeWire native socket (`$XDG_RUNTIME_DIR/pipewire-0`) into the sandbox. When `filters.enable = true`, a dedicated restricted socket is created instead, exposing only the device classes and capabilities you specify. See the [PipeWire filtering guide](pipewire.md) for the full option reference.
+Forwards the PipeWire native socket (`$XDG_RUNTIME_DIR/pipewire-0`) into the sandbox. When `filters.enable = true`, a dedicated restricted socket is created instead, exposing only the device classes and capabilities you specify while still allowing clients to create the playback/capture streams needed for enabled sinks, microphones, and cameras. See the [PipeWire filtering guide](pipewire.md) for the full option reference.
 
 ### PulseAudio
 
@@ -737,6 +741,8 @@ See the sections above for usage examples and explanations.
 | `dbus.policies.broadcast` | attrsOf (list of str) | `{}` | Per-name broadcast rules |
 | `audio.pulseaudio.enable` | bool | `false` | Forward PulseAudio socket for audio |
 | `audio.pipewire.enable` | bool | `false` | Forward PipeWire native socket |
+| `audio.pipewire.alsa.enable` | bool | `false` | Expose ALSA compatibility via PipeWire's ALSA plugin (only needed for raw-ALSA software) |
+| `audio.pipewire.pulseCompat.enable` | bool | `pipewire.enable && !pulseaudio.enable` | Run in-sandbox pipewire-pulse bridge for PulseAudio protocol compatibility |
 | `video.enable` | bool | `false` | Bind /dev/video* devices for webcam/camera access |
 | `printing.enable` | bool | `false` | Forward CUPS printing socket |
 | `fido2.enable` | bool | `false` | Bind /dev/hidraw\* devices for FIDO2/U2F security key access |

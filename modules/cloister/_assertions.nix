@@ -134,6 +134,10 @@
     }
   )
   {
+    assertion = !(sCfg.audio.pipewire.pulseCompat.enable && sCfg.audio.pulseaudio.enable);
+    message = "cloister.sandboxes.${name}: audio.pipewire.pulseCompat.enable and audio.pulseaudio.enable are mutually exclusive. Use pulseCompat for filtered in-sandbox bridging, or pulseaudio for direct host socket forwarding.";
+  }
+  {
     assertion = !sCfg.sandbox.dangerousPathWarnings || matchedDangerousPaths == [ ];
     message = lib.concatStringsSep "\n" (
       [
