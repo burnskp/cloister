@@ -625,7 +625,7 @@ cloister.sandboxes.geeqie = {
 };
 ```
 
-Now `cl-geeqie` launches geeqie directly instead of opening a shell. You can still run other commands explicitly: `cl-geeqie some-other-command`. This is especially useful with `gui.desktopEntry` - the desktop entry's `Exec` line uses `defaultCommand` automatically.
+Now `cl-geeqie` launches geeqie directly instead of opening a shell. Additional arguments are appended to the default command, so `cl-geeqie photo.jpg` runs `geeqie photo.jpg`. To run a different command explicitly, use `-c`: `cl-geeqie -c some-other-command`. Bare `-c` is invalid and exits with a usage error. This is especially useful with `gui.desktopEntry` - the desktop entry's `Exec` line uses `defaultCommand` automatically.
 
 ## Identity anonymization
 
@@ -659,7 +659,7 @@ See the sections above for usage examples and explanations.
 
 | Option | Type | Default | Purpose |
 |--------|------|---------|---------|
-| `defaultCommand` | nullOr (listOf str) | `null` | Command to run when sandbox is invoked without arguments |
+| `defaultCommand` | nullOr (listOf str) | `null` | Default command prefix used when invoked without args, or when appending positional args |
 | `packages` | list of package | *(core set)* | Base packages on the sandbox PATH |
 | `extraPackages` | list of package | `[]` | Additional packages appended to PATH |
 | `shell.name` | enum | `cloister.defaultShell` | Interactive shell (`"zsh"` or `"bash"`) |

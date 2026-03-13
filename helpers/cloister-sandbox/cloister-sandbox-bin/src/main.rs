@@ -223,6 +223,22 @@ fn err_prefix(name: &str) -> String {
     format!("cloister-sandbox[{name}]")
 }
 
+fn prepare_run_cmd(
+    config: &SandboxConfig,
+    sandbox_args: &[String],
+) -> Result<(Vec<String>, bool), &'static str> {
+    let parsed_args = env::parse_sandbox_args(sandbox_args)?;
+    let run_cmd = env::build_run_cmd(
+        &config.shell_bin,
+        &config.shell_interactive_args,
+        config.default_command.as_deref(),
+        &parsed_args,
+    );
+    let is_interactive = env::is_interactive(&parsed_args, config.default_command.as_deref());
+
+    Ok((run_cmd, is_interactive))
+}
+
 fn run() -> i32 {
     // --- 1. Parse CLI args ---
     let args: Vec<String> = std::env::args().collect();
@@ -683,16 +699,15 @@ fn run() -> i32 {
     }
 
     // --- 10. Parse command args and build run_cmd ---
-    let command_args = env::parse_sandbox_args(&sandbox_args);
-    let run_cmd = env::build_run_cmd(
-        &config.shell_bin,
-        &config.shell_interactive_args,
-        config.default_command.as_deref(),
-        &command_args,
-    );
+    let (run_cmd, is_interactive) = match prepare_run_cmd(&config, &sandbox_args) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("{prefix}: {e}");
+            process::exit(2);
+        }
+    };
 
     // --- 11. Spawn bwrap ---
-    let is_interactive = env::is_interactive(&command_args, config.default_command.as_deref());
     let run_cmd = build_session_run_cmd(&config, run_cmd, is_interactive);
     INTERACTIVE_MODE.store(is_interactive, Ordering::Release);
 
@@ -946,6 +961,13 @@ mod tests {
         ]);
         let (_, _, sandbox_args) = parse_cli_args(&args);
         assert_eq!(sandbox_args, vec!["-c", "echo", "hello"]);
+    }
+
+    #[test]
+    fn prepare_run_cmd_rejects_bare_c_flag() {
+        let config = config_with_flags(false, false, false, None, None, false);
+        let result = prepare_run_cmd(&config, &s(&["-c"]));
+        assert_eq!(result, Err("`-c` requires a command"));
     }
 
     #[test]

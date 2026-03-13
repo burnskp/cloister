@@ -2443,6 +2443,74 @@ in
       ]
       "incompatible with sandbox.extraBinds.perDir";
 
+  browser-shared-profile-bind-working-dir-disabled =
+    mkConfigCheck "sandbox-browser-shared-profile-bind-working-dir-disabled"
+      (evalConfig {
+        modules = [
+          {
+            cloister = {
+              enable = true;
+              sandboxes.chromium = {
+                sandbox = {
+                  bindWorkingDirectory = false;
+                  extraBinds.dir."/home/testuser/.local/state" = [
+                    ".config/chromium"
+                    ".cache/chromium"
+                  ];
+                };
+              };
+            };
+          }
+        ];
+      })
+      "chromium"
+      ''"bind_working_directory":false''
+      true;
+
+  browser-shared-profile-no-perdir = mkConfigCheck "sandbox-browser-shared-profile-no-perdir" (
+    evalConfig
+    {
+      modules = [
+        {
+          cloister = {
+            enable = true;
+            sandboxes.chromium = {
+              sandbox = {
+                bindWorkingDirectory = false;
+                extraBinds.dir."/home/testuser/.local/state" = [
+                  ".config/chromium"
+                  ".cache/chromium"
+                ];
+              };
+            };
+          };
+        }
+      ];
+    }
+  ) "chromium" ''"per_dir_paths":[]'' true;
+
+  browser-shared-profile-dir-binds = mkConfigCheck "sandbox-browser-shared-profile-dir-binds" (
+    evalConfig
+    {
+      modules = [
+        {
+          cloister = {
+            enable = true;
+            sandboxes.chromium = {
+              sandbox = {
+                bindWorkingDirectory = false;
+                extraBinds.dir."/home/testuser/.local/state" = [
+                  ".config/chromium"
+                  ".cache/chromium"
+                ];
+              };
+            };
+          };
+        }
+      ];
+    }
+  ) "chromium" "/home/testuser/.local/state/cloister/chromium/.config/chromium" true;
+
   # ── shell.hostConfig tests ──────────────────────────────────────────
 
   host-config-default-true = mkConfigCheck "sandbox-host-config-default-true" (evalConfig {

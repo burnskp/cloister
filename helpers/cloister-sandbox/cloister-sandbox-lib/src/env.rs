@@ -1,57 +1,73 @@
 //! Environment variable handling for sandboxes.
 
-/// Build the run command: explicit args > default command > interactive shell.
+/// Parsed sandbox arguments and whether they explicitly override `defaultCommand`.
+pub struct ParsedSandboxArgs {
+    pub args: Vec<String>,
+    pub explicit_command: bool,
+}
+
+/// Build the run command: default command + args > explicit command > interactive shell.
 pub fn build_run_cmd(
     shell_bin: &str,
     shell_interactive_args: &[String],
     default_command: Option<&[String]>,
-    command_args: &[String],
+    parsed_args: &ParsedSandboxArgs,
 ) -> Vec<String> {
-    if !command_args.is_empty() {
-        // If args start with a flag and we have a default command,
-        // prepend the default command so the binary name is always present
-        if command_args[0].starts_with('-') {
-            if let Some(default_cmd) = default_command {
-                let mut cmd = default_cmd.to_vec();
-                cmd.extend_from_slice(command_args);
-                return cmd;
-            }
-        }
-        // Explicit command args take priority
-        command_args.to_vec()
-    } else if let Some(default_cmd) = default_command {
-        // Default command when no args given
-        default_cmd.to_vec()
-    } else {
-        // Interactive shell fallback
-        let mut cmd = vec![shell_bin.to_string()];
-        cmd.extend_from_slice(shell_interactive_args);
-        cmd
+    if parsed_args.explicit_command {
+        return parsed_args.args.clone();
     }
+
+    if let Some(default_cmd) = default_command {
+        let mut cmd = default_cmd.to_vec();
+        cmd.extend_from_slice(&parsed_args.args);
+        return cmd;
+    }
+
+    if !parsed_args.args.is_empty() {
+        return parsed_args.args.clone();
+    }
+
+    // Interactive shell fallback
+    let mut cmd = vec![shell_bin.to_string()];
+    cmd.extend_from_slice(shell_interactive_args);
+    cmd
 }
 
 /// Returns `true` when the sandbox will launch an interactive shell.
 ///
 /// This matches the "interactive shell fallback" path in [`build_run_cmd`]:
 /// no explicit command args and no configured default command.
-pub fn is_interactive(command_args: &[String], default_command: Option<&[String]>) -> bool {
-    command_args.is_empty() && default_command.is_none()
+pub fn is_interactive(parsed_args: &ParsedSandboxArgs, default_command: Option<&[String]>) -> bool {
+    parsed_args.args.is_empty() && default_command.is_none() && !parsed_args.explicit_command
 }
 
 /// Parse sandbox CLI arguments.
 ///
 /// Modes:
-/// - No args → interactive shell
-/// - `-c cmd [args...]` → command mode (strip -c)
-/// - `cmd [args...]` → command mode (pass through)
-pub fn parse_sandbox_args(args: &[String]) -> Vec<String> {
+/// - No args → interactive shell or default command
+/// - `-c cmd [args...]` → explicit command mode (strip -c)
+/// - `cmd [args...]` → arguments for the default command when configured
+pub fn parse_sandbox_args(args: &[String]) -> Result<ParsedSandboxArgs, &'static str> {
     if args.is_empty() {
-        return Vec::new();
+        return Ok(ParsedSandboxArgs {
+            args: Vec::new(),
+            explicit_command: false,
+        });
     }
+
     if args[0] == "-c" {
-        args[1..].to_vec()
+        if args.len() == 1 {
+            return Err("`-c` requires a command");
+        }
+        Ok(ParsedSandboxArgs {
+            args: args[1..].to_vec(),
+            explicit_command: true,
+        })
     } else {
-        args.to_vec()
+        Ok(ParsedSandboxArgs {
+            args: args.to_vec(),
+            explicit_command: false,
+        })
     }
 }
 
@@ -61,27 +77,45 @@ mod tests {
 
     #[test]
     fn parse_no_args() {
-        let result = parse_sandbox_args(&[]);
-        assert!(result.is_empty());
+        let result = parse_sandbox_args(&[]).unwrap();
+        assert!(result.args.is_empty());
+        assert!(!result.explicit_command);
     }
 
     #[test]
     fn parse_with_c_flag() {
         let args = vec!["-c".to_string(), "echo".to_string(), "hello".to_string()];
-        let result = parse_sandbox_args(&args);
-        assert_eq!(result, vec!["echo", "hello"]);
+        let result = parse_sandbox_args(&args).unwrap();
+        assert_eq!(result.args, vec!["echo", "hello"]);
+        assert!(result.explicit_command);
     }
 
     #[test]
     fn parse_without_c_flag() {
         let args = vec!["echo".to_string(), "hello".to_string()];
+        let result = parse_sandbox_args(&args).unwrap();
+        assert_eq!(result.args, vec!["echo", "hello"]);
+        assert!(!result.explicit_command);
+    }
+
+    #[test]
+    fn parse_bare_c_flag_errors() {
+        let args = vec!["-c".to_string()];
         let result = parse_sandbox_args(&args);
-        assert_eq!(result, vec!["echo", "hello"]);
+        assert!(matches!(result, Err("`-c` requires a command")));
     }
 
     #[test]
     fn build_interactive_cmd() {
-        let cmd = build_run_cmd("/bin/zsh", &["-i".to_string()], None, &[]);
+        let cmd = build_run_cmd(
+            "/bin/zsh",
+            &["-i".to_string()],
+            None,
+            &ParsedSandboxArgs {
+                args: Vec::new(),
+                explicit_command: false,
+            },
+        );
         assert_eq!(cmd, vec!["/bin/zsh", "-i"]);
     }
 
@@ -91,7 +125,10 @@ mod tests {
             "/bin/zsh",
             &["-i".to_string()],
             None,
-            &["echo".to_string(), "hello".to_string()],
+            &ParsedSandboxArgs {
+                args: vec!["echo".to_string(), "hello".to_string()],
+                explicit_command: false,
+            },
         );
         assert_eq!(cmd, vec!["echo", "hello"]);
     }
@@ -99,20 +136,31 @@ mod tests {
     #[test]
     fn build_default_command() {
         let default = vec!["geeqie".to_string()];
-        let cmd = build_run_cmd("/bin/bash", &["-l".to_string()], Some(&default), &[]);
+        let cmd = build_run_cmd(
+            "/bin/bash",
+            &["-l".to_string()],
+            Some(&default),
+            &ParsedSandboxArgs {
+                args: Vec::new(),
+                explicit_command: false,
+            },
+        );
         assert_eq!(cmd, vec!["geeqie"]);
     }
 
     #[test]
-    fn build_explicit_overrides_default() {
+    fn build_explicit_args_append_to_default() {
         let default = vec!["geeqie".to_string()];
         let cmd = build_run_cmd(
             "/bin/bash",
             &["-l".to_string()],
             Some(&default),
-            &["mpv".to_string(), "video.mp4".to_string()],
+            &ParsedSandboxArgs {
+                args: vec!["photo.jpg".to_string()],
+                explicit_command: false,
+            },
         );
-        assert_eq!(cmd, vec!["mpv", "video.mp4"]);
+        assert_eq!(cmd, vec!["geeqie", "photo.jpg"]);
     }
 
     #[test]
@@ -122,31 +170,73 @@ mod tests {
             "/bin/bash",
             &["-l".to_string()],
             Some(&default),
-            &["-ozone-platform=wayland".to_string()],
+            &ParsedSandboxArgs {
+                args: vec!["-ozone-platform=wayland".to_string()],
+                explicit_command: false,
+            },
         );
         assert_eq!(cmd, vec!["helium", "-ozone-platform=wayland"]);
     }
 
     #[test]
+    fn build_explicit_command_overrides_default() {
+        let default = vec!["geeqie".to_string()];
+        let cmd = build_run_cmd(
+            "/bin/bash",
+            &["-l".to_string()],
+            Some(&default),
+            &ParsedSandboxArgs {
+                args: vec!["mpv".to_string(), "video.mp4".to_string()],
+                explicit_command: true,
+            },
+        );
+        assert_eq!(cmd, vec!["mpv", "video.mp4"]);
+    }
+
+    #[test]
     fn interactive_no_args_no_default() {
-        assert!(is_interactive(&[], None));
+        assert!(is_interactive(
+            &ParsedSandboxArgs {
+                args: Vec::new(),
+                explicit_command: false,
+            },
+            None
+        ));
     }
 
     #[test]
     fn not_interactive_with_command_args() {
-        assert!(!is_interactive(&["echo".to_string()], None));
+        assert!(!is_interactive(
+            &ParsedSandboxArgs {
+                args: vec!["echo".to_string()],
+                explicit_command: false,
+            },
+            None
+        ));
     }
 
     #[test]
     fn not_interactive_with_default_command() {
         let default = vec!["geeqie".to_string()];
-        assert!(!is_interactive(&[], Some(&default)));
+        assert!(!is_interactive(
+            &ParsedSandboxArgs {
+                args: Vec::new(),
+                explicit_command: false,
+            },
+            Some(&default)
+        ));
     }
 
     #[test]
     fn not_interactive_with_both() {
         let default = vec!["geeqie".to_string()];
-        assert!(!is_interactive(&["mpv".to_string()], Some(&default)));
+        assert!(!is_interactive(
+            &ParsedSandboxArgs {
+                args: vec!["mpv".to_string()],
+                explicit_command: false,
+            },
+            Some(&default)
+        ));
     }
 
     #[test]
@@ -155,8 +245,22 @@ mod tests {
             "/bin/bash",
             &["-l".to_string()],
             None,
-            &["-ozone-platform=wayland".to_string()],
+            &ParsedSandboxArgs {
+                args: vec!["-ozone-platform=wayland".to_string()],
+                explicit_command: false,
+            },
         );
         assert_eq!(cmd, vec!["-ozone-platform=wayland"]);
+    }
+
+    #[test]
+    fn explicit_command_is_not_interactive() {
+        assert!(!is_interactive(
+            &ParsedSandboxArgs {
+                args: vec!["echo".to_string()],
+                explicit_command: true,
+            },
+            None
+        ));
     }
 }

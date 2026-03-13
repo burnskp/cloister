@@ -5,8 +5,8 @@
 # app launcher.
 #
 # Usage:
-#  cl-chromium                    # launch Chromium interactively
-#  cl-chromium chromium %U        # explicit command (args auto-set in .desktop file)
+#  cl-chromium                    # launch Chromium
+#  cl-chromium %U                # URL args append to chromium automatically
 #
 # Add this to your home-manager config alongside the cloister module import:
 #
@@ -14,7 +14,11 @@
 #  cloister.enable = true;
 #
 # Then merge the sandboxes definition below into your cloister config.
-{ pkgs, ... }:
+{
+  config,
+  pkgs,
+  ...
+}:
 {
   cloister.sandboxes.chromium = {
     shell = {
@@ -90,10 +94,17 @@
 
     # Persistence
     sandbox = {
-      # Chromium profile survives across sessions, isolated per-project
-      extraBinds.perDir = [
+      # Browser sandboxes should use one stable profile so repeated launches
+      # can hand URLs to the existing Chromium instance.
+      #
+      # Chromium-family browsers also use a singleton socket under TMPDIR on
+      # Linux, so give them a shared temp dir instead of the sandbox's private
+      # /tmp when you want "open in existing window/tab" behavior.
+      bindWorkingDirectory = false;
+      extraBinds.dir."${config.xdg.stateHome}" = [
         ".config/chromium"
         ".cache/chromium"
+        ".cache/chromium-tmp"
       ];
 
       # Allow Chromium's internal sandbox (seccomp-bpf + chroot for renderer
@@ -105,6 +116,7 @@
       # Chromium flags
       env = {
         CHROMIUM_FLAGS = "--enable-features=UseOzonePlatform --ozone-platform=wayland";
+        TMPDIR = "${config.xdg.cacheHome}/chromium-tmp";
       };
     };
 
