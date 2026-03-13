@@ -22,42 +22,42 @@
       [
         {
           src = toString config.xdg.configFile.${key}.source;
-          dest = "${config.home.homeDirectory}/.config/${key}";
+          dest = "$HOME/.config/${key}";
           try = false;
         }
       ]
     else if prefixEntries != { } then
       lib.mapAttrsToList (name: entry: {
         src = toString entry.source;
-        dest = "${config.home.homeDirectory}/.config/${name}";
+        dest = "$HOME/.config/${name}";
         try = false;
       }) prefixEntries
     else if hasHome then
       [
         {
           src = toString config.home.file.${absKey}.source;
-          dest = "${config.home.homeDirectory}/.config/${key}";
+          dest = "$HOME/.config/${key}";
           try = false;
         }
       ]
     else if homePrefixEntries != { } then
       lib.mapAttrsToList (name: entry: {
         src = toString entry.source;
-        dest = "${config.home.homeDirectory}/.config/${lib.removePrefix "${configHome}/" name}";
+        dest = "$HOME/.config/${lib.removePrefix "${configHome}/" name}";
         try = false;
       }) homePrefixEntries
     else if hasDirectHome then
       [
         {
           src = toString config.home.file.${key}.source;
-          dest = "${config.home.homeDirectory}/${key}";
+          dest = "$HOME/${key}";
           try = false;
         }
       ]
     else if directHomePrefixEntries != { } then
       lib.mapAttrsToList (name: entry: {
         src = toString entry.source;
-        dest = "${config.home.homeDirectory}/${name}";
+        dest = "$HOME/${name}";
         try = false;
       }) directHomePrefixEntries
     else

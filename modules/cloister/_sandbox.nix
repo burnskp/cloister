@@ -111,7 +111,6 @@ let
   mkSandbox =
     name: sCfg:
     let
-      resolveHome = path: builtins.replaceStrings [ "$HOME" ] [ config.home.homeDirectory ] path;
       shellLib = shells.${sCfg.shell.name};
       guiEnabled = sCfg.gui.wayland.enable || sCfg.gui.x11.enable;
       gpuEnabled = sCfg.gui.gpu.enable;
@@ -269,18 +268,28 @@ let
       resolvedExtraRo = requiredRo ++ optionalRo;
       resolvedExtraRw = requiredRw ++ optionalRw ++ dirBinds ++ fileBinds ++ perDirBinds ++ copyFileBinds;
 
-      managedFileBinds = lib.concatMap resolveConfigEntry sCfg.sandbox.extraBinds.managedFile;
+      # Resolve $HOME in managed file dests to the correct sandbox-side home
+      # directory at eval time, so they work with both anonymize on and off.
+      managedFileHome = if anonymize then sandboxHome else config.home.homeDirectory;
+      managedFileBinds = map (
+        bind:
+        bind
+        // {
+          dest = builtins.replaceStrings [ "$HOME" ] [ managedFileHome ] bind.dest;
+        }
+      ) (lib.concatMap resolveConfigEntry sCfg.sandbox.extraBinds.managedFile);
       managedFileDirs = lib.unique (map (bind: builtins.dirOf bind.dest) managedFileBinds);
 
       # Partition managedFileBinds: binds whose dest falls inside a dir-backed
       # bind mount must be applied AFTER the dir bind in bwrap, otherwise the
       # directory mount shadows the individual file mounts.
+      resolveManagedHome = builtins.replaceStrings [ "$HOME" ] [ managedFileHome ];
       managedFileOverlapsDir =
         bind:
         builtins.any (
           dirBind:
           let
-            dirDest = resolveHome (if dirBind.dest != null then dirBind.dest else dirBind.src);
+            dirDest = resolveManagedHome (if dirBind.dest != null then dirBind.dest else dirBind.src);
           in
           bind.dest == dirDest || lib.hasPrefix "${dirDest}/" bind.dest
         ) dirBinds;
@@ -293,12 +302,10 @@ let
       managedFileDirOverlap =
         dir:
         let
-          # dirBinds use "$HOME/..." while managedFileDirs use concrete homeDirectory;
-          # resolve $HOME so comparison works.
           matchingBinds = builtins.filter (
             bind:
             let
-              dest = resolveHome (if bind.dest != null then bind.dest else bind.src);
+              dest = resolveManagedHome (if bind.dest != null then bind.dest else bind.src);
             in
             dir == dest || lib.hasPrefix "${dest}/" dir
           ) dirBinds;
@@ -308,7 +315,7 @@ let
         else
           let
             bind = builtins.head matchingBinds;
-            dest = resolveHome (if bind.dest != null then bind.dest else bind.src);
+            dest = resolveManagedHome (if bind.dest != null then bind.dest else bind.src);
             relativePath = lib.removePrefix dest dir;
           in
           "${bind.src}${relativePath}";
