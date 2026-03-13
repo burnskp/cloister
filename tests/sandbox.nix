@@ -1165,9 +1165,30 @@ in
         && lib.hasInfix ''pipewire-0-manager = "unrestricted"'' pipewireConfText
       );
 
-  pipewire-filters-keep-baseline-rx = mkCheck "sandbox-pipewire-filters-keep-baseline-rx" (
-    lib.hasInfix ''default_permissions = "rx"'' pipewireWireplumberConfText
+  pipewire-filters-baseline-with-link-permission = mkCheck "sandbox-pipewire-filters-baseline-with-link-permission" (
+    lib.hasInfix ''default_permissions = "l"'' pipewireWireplumberConfText
   );
+
+  pipewire-filters-explicitly-grant-allowed-objects =
+    let
+      confFile = pkgs.writeText "pipewire-filters-conf" pipewireWireplumberConfText;
+    in
+    pkgs.runCommand "check-sandbox-pipewire-filters-explicitly-grant-allowed-objects" { } ''
+      lua_path=$(${pkgs.gnugrep}/bin/grep -oP '/nix/store/[^,]+\.lua' ${confFile})
+      ${pkgs.gnugrep}/bin/grep -qF 'type = "node"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'for _, media_class in ipairs({ "Audio/Sink" }) do' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'local access = properties["pipewire.access.effective"] or properties["access"]' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'return access == "cloister-2fe5c61b"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'client:update_permissions({' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF '["all"] = base_permissions' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'local self_permissions = "rx"' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF '[0] = self_permissions' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF '[client_id] = self_permissions' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'permissions[node_id] = "rx"' "$lua_path"
+      ! ${pkgs.gnugrep}/bin/grep -qF 'grant(client, node_id, "-")' "$lua_path"
+      ! ${pkgs.gnugrep}/bin/grep -qF 'grant(client, metadata["bound-id"], "-")' "$lua_path"
+      touch $out
+    '';
 
   pipewire-routing-uses-metadata-object-ids =
     let
@@ -1178,7 +1199,7 @@ in
       lua_path=$(${pkgs.gnugrep}/bin/grep -oP '/nix/store/[^,]+\.lua' ${confFile})
       ${pkgs.gnugrep}/bin/grep -qF 'type = "metadata"' "$lua_path"
       ${pkgs.gnugrep}/bin/grep -qF 'local metadata_id = metadata["bound-id"]' "$lua_path"
-      ${pkgs.gnugrep}/bin/grep -qF 'client:update_permissions { [metadata_id] = "rxm" }' "$lua_path"
+      ${pkgs.gnugrep}/bin/grep -qF 'grant(client, metadata_id, "rxm")' "$lua_path"
       ! ${pkgs.gnugrep}/bin/grep -qF '["Metadata"]' "$lua_path"
       touch $out
     '';

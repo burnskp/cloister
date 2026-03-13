@@ -820,9 +820,9 @@ in
 
         getMediaClasses =
           filters:
-          lib.optional filters.audioOut "\"Audio/Sink\""
-          ++ lib.optional filters.audioIn "\"Audio/Source\""
-          ++ lib.optional filters.videoIn "\"Video/Source\"";
+          lib.optional filters.audioOut "Audio/Sink"
+          ++ lib.optional filters.audioIn "Audio/Source"
+          ++ lib.optional filters.videoIn "Video/Source";
 
         pipewireSocketEntries = lib.concatMapStrings (hash: ''
           { name = "pipewire-cloister-${hash}" }
@@ -869,7 +869,7 @@ in
                     ]
                     actions = {
                       update-props = {
-                        default_permissions = "rx"
+                        default_permissions = "l"
                       }
                     }
                   }
@@ -896,32 +896,57 @@ in
           let
             perms = getPerms filters;
             classes = getMediaClasses filters;
+            allowedClassesLua = lib.concatStringsSep ", " (map builtins.toJSON classes);
           in
           pkgs.writeText "access-cloister-${hash}.lua" (
             ''
               local log = Log.open_topic("s-client")
+              local base_permissions = "l"
+              local self_permissions = "rx"
+
+              local function grant(client, object_id, permissions)
+                client:update_permissions { [object_id] = permissions }
+              end
+
+              local allowed_media_classes = {}
+              for _, media_class in ipairs({ ${allowedClassesLua} }) do
+                allowed_media_classes[media_class] = true
+              end
+
+              local function is_allowed_node(node)
+                local properties = node.properties
+                if properties == nil then
+                  return false
+                end
+
+                local media_class = properties["media.class"]
+                return media_class ~= nil and allowed_media_classes[media_class] == true
+              end
+
+              local function is_cloister_client(client)
+                local properties = client.properties
+                if properties == nil then
+                  return false
+                end
+
+                local access = properties["pipewire.access.effective"] or properties["access"]
+                return access == "cloister-${hash}"
+              end
 
               local cloister_clients = ObjectManager {
                 Interest {
-                  type = "client",
-                  Constraint { "access", "=", "cloister-${hash}" }
+                  type = "client"
                 }
               }
 
-              local media_nodes = ObjectManager {
-            ''
-            + lib.concatStringsSep ",\n                " (
-              map (c: ''
+              local node_objects = ObjectManager {
                 Interest {
-                  type = "node",
-                  Constraint { "media.class", "=", ${c} }
-                }'') classes
-            )
-            + ''
+                  type = "node"
+                }
               }
+
             ''
             + lib.optionalString filters.routing ''
-
               local metadata_objects = ObjectManager {
                 Interest {
                   type = "metadata"
@@ -930,44 +955,69 @@ in
             ''
             + ''
 
-              media_nodes:connect("object-added", function(om, node)
-                local node_id = node["bound-id"]
-                for client in cloister_clients:iterate() do
-                  log:info(client, "Granting '${perms}' for node " .. node_id .. " to cloister-${hash} client")
-                  client:update_permissions { [node_id] = "${perms}" }
-                end
-              end)
-
-              cloister_clients:connect("object-added", function(om, client)
+              local function sync_client_permissions(client)
                 local client_id = client["bound-id"]
-                log:info(client, "New cloister-${hash} client " .. client_id .. " connected, granting specific ${perms} access")
-                for node in media_nodes:iterate() do
-                  local node_id = node["bound-id"]
-                  client:update_permissions { [node_id] = "${perms}" }
+                log:info(client, "Syncing cloister-${hash} client " .. client_id .. " permissions")
+                client:update_permissions({
+                  ["all"] = base_permissions,
+                })
+
+                local permissions = {
+                  [0] = self_permissions,
+                  [client_id] = self_permissions,
+                }
+
+                for node in node_objects:iterate() do
+                  if is_allowed_node(node) then
+                    local node_id = node["bound-id"]
+                    permissions[node_id] = "${perms}"
+                  end
                 end
+
             ''
             + lib.optionalString filters.routing ''
               for metadata in metadata_objects:iterate() do
                 local metadata_id = metadata["bound-id"]
-                client:update_permissions { [metadata_id] = "${perms}" }
+                permissions[metadata_id] = "${perms}"
               end
             ''
             + ''
+                client:update_permissions(permissions)
+              end
+
+              node_objects:connect("object-added", function(om, node)
+                if is_allowed_node(node) then
+                  local node_id = node["bound-id"]
+                  for client in cloister_clients:iterate() do
+                    if is_cloister_client(client) then
+                      log:info(client, "Granting '${perms}' for node " .. node_id .. " to cloister-${hash} client")
+                      grant(client, node_id, "${perms}")
+                    end
+                  end
+                end
               end)
+
             ''
             + lib.optionalString filters.routing ''
-
               metadata_objects:connect("object-added", function(om, metadata)
                 local metadata_id = metadata["bound-id"]
                 for client in cloister_clients:iterate() do
-                  log:info(client, "Granting '${perms}' for metadata " .. metadata_id .. " to cloister-${hash} client")
-                  client:update_permissions { [metadata_id] = "${perms}" }
+                  if is_cloister_client(client) then
+                    log:info(client, "Granting '${perms}' for metadata " .. metadata_id .. " to cloister-${hash} client")
+                    grant(client, metadata_id, "${perms}")
+                  end
                 end
               end)
             ''
             + ''
 
-              media_nodes:activate()
+              cloister_clients:connect("object-added", function(om, client)
+                if is_cloister_client(client) then
+                  sync_client_permissions(client)
+                end
+              end)
+
+              node_objects:activate()
             ''
             + lib.optionalString filters.routing ''
               metadata_objects:activate()

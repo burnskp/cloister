@@ -1,7 +1,10 @@
 use pipewire as pw;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::fmt::Write;
+use std::process::ExitCode;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct FilterStatus {
@@ -80,16 +83,67 @@ fn validate(status: &FilterStatus) -> String {
     out
 }
 
-fn main() {
-    let verbose = std::env::args().any(|a| a == "-v" || a == "--verbose");
+struct Args {
+    verbose: bool,
+    timeout: Duration,
+}
+
+fn usage(program: &str) -> String {
+    format!("Usage: {program} [-v|--verbose] [--timeout-ms <milliseconds>]")
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut verbose = false;
+    let mut timeout = Duration::from_secs(3);
+    let mut args = std::env::args();
+    let program = args
+        .next()
+        .unwrap_or_else(|| "cloister-pipewire-validate".to_string());
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-v" | "--verbose" => verbose = true,
+            "--timeout-ms" => {
+                let value = args.next().ok_or_else(|| {
+                    format!("Missing value for --timeout-ms\n{}", usage(&program))
+                })?;
+                let millis = value.parse::<u64>().map_err(|_| {
+                    format!(
+                        "Invalid timeout '{value}' for --timeout-ms\n{}",
+                        usage(&program)
+                    )
+                })?;
+                timeout = Duration::from_millis(millis);
+            }
+            "-h" | "--help" => {
+                return Err(usage(&program));
+            }
+            _ => {
+                return Err(format!("Unknown argument '{arg}'\n{}", usage(&program)));
+            }
+        }
+    }
+
+    Ok(Args { verbose, timeout })
+}
+
+fn collect_status(
+    timeout: Duration,
+    verbose: bool,
+) -> Result<(FilterStatus, Vec<GlobalInfo>), String> {
+    let timeout_hint = "This usually means the client can reach the PipeWire socket but lacks enough permissions to complete the initial registry sync.";
 
     pw::init();
-    let mainloop = pw::main_loop::MainLoop::new(None).expect("Failed to create mainloop");
-    let context = pw::context::Context::new(&mainloop).expect("Failed to create context");
+    let mainloop = pw::main_loop::MainLoop::new(None)
+        .map_err(|e| format!("Failed to create mainloop: {e}"))?;
+    let context = pw::context::Context::new(&mainloop)
+        .map_err(|e| format!("Failed to create context: {e}"))?;
     let core = context
         .connect(None)
-        .expect("Failed to connect to PipeWire");
-    let registry = core.get_registry().expect("Failed to get registry");
+        .map_err(|e| format!("Failed to connect to PipeWire: {e}"))?;
+    let registry = core
+        .get_registry()
+        .map_err(|e| format!("Failed to get registry: {e}"))?;
 
     let status = Rc::new(RefCell::new(FilterStatus::default()));
     let globals: Rc<RefCell<Vec<GlobalInfo>>> = Rc::new(RefCell::new(Vec::new()));
@@ -137,23 +191,82 @@ fn main() {
         })
         .register();
 
-    let pending = core.sync(0).expect("Failed to sync");
-    let mainloop_clone = mainloop.clone();
+    let pending = core
+        .sync(0)
+        .map_err(|e| format!("Failed to sync with PipeWire core: {e}"))?;
+    let sync_complete = Rc::new(Cell::new(false));
+    let sync_complete_clone = sync_complete.clone();
     let _sync_listener = core
         .add_listener_local()
         .done(move |_, seq| {
             if seq == pending {
-                mainloop_clone.quit();
+                sync_complete_clone.set(true);
             }
         })
         .register();
-    mainloop.run();
 
-    if verbose {
-        eprint!("{}", format_globals(&globals.borrow()));
+    let start = Instant::now();
+    while !sync_complete.get() {
+        let elapsed = start.elapsed();
+        if elapsed >= timeout {
+            return Err(format!(
+                "Timed out waiting for PipeWire registry sync after {} ms.\n{}",
+                timeout.as_millis(),
+                timeout_hint
+            ));
+        }
+
+        let remaining = timeout - elapsed;
+        let step = remaining.min(Duration::from_millis(100));
+        let result = mainloop.loop_().iterate(step);
+        if result < 0 {
+            return Err(format!(
+                "PipeWire loop error while waiting for registry sync: {result}\n{}",
+                timeout_hint
+            ));
+        }
+    }
+
+    drop(_sync_listener);
+    drop(_listener);
+
+    let status = Rc::try_unwrap(status)
+        .map_err(|_| "Internal error: failed to unwrap PipeWire status state".to_string())?
+        .into_inner();
+    let globals = Rc::try_unwrap(globals)
+        .map_err(|_| "Internal error: failed to unwrap PipeWire globals state".to_string())?
+        .into_inner();
+
+    Ok((status, globals))
+}
+
+fn main() -> ExitCode {
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("{message}");
+            return if message.starts_with("Usage:") {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+    };
+
+    let (status, globals) = match collect_status(args.timeout, args.verbose) {
+        Ok(result) => result,
+        Err(message) => {
+            eprintln!("Error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if args.verbose {
+        eprint!("{}", format_globals(&globals));
         eprintln!();
     }
-    eprint!("{}", validate(&status.borrow()));
+    eprint!("{}", validate(&status));
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]
@@ -255,6 +368,12 @@ mod tests {
         assert!(output.contains("1 visible"));
         assert!(output.contains("id=32"));
         assert!(output.contains("media.class=Audio/Sink"));
+    }
+
+    #[test]
+    fn usage_mentions_timeout_flag() {
+        let output = usage("cloister-pipewire-validate");
+        assert!(output.contains("--timeout-ms"));
     }
 
     #[test]

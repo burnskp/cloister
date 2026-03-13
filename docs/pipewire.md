@@ -6,7 +6,7 @@ Enabling **PipeWire filters** (`audio.pipewire.filters.enable = true`) restricts
 
 ## Configuration
 
-With `filters.enable = true`, the sandbox starts with read/execute-only baseline permissions and `audioOut` enabled. Everything else is opt-in:
+With `filters.enable = true`, the sandbox starts with `audioOut` enabled and everything else is opt-in. The policy keeps the client on a link-only baseline and adds explicit grants only for the device classes you enabled:
 
 ```nix
 cloister.sandboxes.zoom = {
@@ -45,6 +45,10 @@ These grant additional WirePlumber permissions on objects the sandbox can alread
 | `control` | `w` (write) | Change volume, mute state of visible nodes |
 | `routing` | `m` (metadata) | Change default devices, move streams |
 
+Hidden targets remain unavailable for discovery. The link-only baseline lets sandbox-created streams connect to the specific sinks or sources you explicitly expose without making the rest of the graph visible.
+
+With only `filters.enable = true`, the visible graph should be limited to the PipeWire core, the sandbox's own client object, and `Audio/Sink` nodes. Microphones, cameras, metadata, and unrelated clients should stay hidden.
+
 ## Deduplication
 
 The socket name is derived from a hash of the filter config (e.g., `pipewire-cloister-a1b2c3d4`). Sandboxes with identical filter settings share a single socket and WirePlumber policy automatically.
@@ -59,3 +63,5 @@ cloister-pipewire-validate -v   # per-object detail
 ```
 
 For manual debugging, `wpctl status` shows visible devices and `wpctl set-volume <id> 5%+` can confirm whether `control` is effective.
+
+For a quick policy check, `cloister-pipewire-validate -v` should show only `Audio/Sink` nodes when only `audioOut` is enabled. The summary output should report `audioOut: true` and everything else `false`.
