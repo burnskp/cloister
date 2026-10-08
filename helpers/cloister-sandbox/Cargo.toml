@@ -1,0 +1,7 @@
+[profile.release]
+strip = true
+lto = true
+
+[workspace]
+members = ["cloister-sandbox-lib", "cloister-sandbox-bin"]
+resolver = "2"

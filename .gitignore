@@ -1,0 +1,15 @@
+# Nix
+result
+result-*
+
+# Rust
+target/
+
+# direnv
+.direnv/
+.worktrees/
+
+# AI Tools
+.couchai
+.opencode
+.pi

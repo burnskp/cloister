@@ -1,0 +1,764 @@
+//! Bubblewrap argument construction.
+//!
+//! Assembles the full bwrap command-line from static config args,
+//! runtime-resolved dynamic binds, and conditional feature args.
+//!
+//! Arguments are passed to bwrap via `--args FD` (NUL-separated in a sealed memfd)
+//! to keep `ps` output clean and avoid ARG_MAX limits.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, Seek, Write};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::path::Path;
+use std::process::Command;
+
+use nix::fcntl::{FcntlArg, FdFlag, SealFlag, fcntl};
+use nix::sys::memfd::{MFdFlags, memfd_create};
+
+use crate::config::{BindMode, DelegatedAccessMode, SandboxConfig};
+use crate::vars;
+
+fn anonymized_identity(config: &SandboxConfig) -> io::Result<&str> {
+    config.anonymized_identity().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "anonymized sandbox identity is missing; sandbox_home must end with a username",
+        )
+    })
+}
+
+/// Build the complete bwrap Command from config and runtime state.
+///
+/// Returns the Command and an `OwnedFd` for the sealed memfd that carries
+/// NUL-separated arguments via `--args FD`. The caller must keep the
+/// `OwnedFd` alive until `cmd.status()` returns.
+pub fn build_bwrap_command(
+    config: &SandboxConfig,
+    runtime_vars: &HashMap<String, String>,
+    extra_args: Vec<String>,
+    run_cmd: &[String],
+    start_dir: &str,
+    interactive: bool,
+) -> io::Result<(Command, OwnedFd)> {
+    // --- Collect all bwrap namespace/mount options ---
+    let mut args: Vec<String> = Vec::new();
+
+    // Core isolation flags
+    args.push("--die-with-parent".into());
+    if !interactive {
+        args.push("--new-session".into());
+    }
+    args.push("--unshare-all".into());
+
+    // Network
+    if config.network_enable {
+        args.push("--share-net".into());
+    }
+
+    // Anonymization: hostname + uid/gid override
+    if config.anonymize {
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let identity = anonymized_identity(config)?;
+        args.extend([
+            "--hostname".to_string(),
+            identity.to_string(),
+            "--uid".to_string(),
+            uid.to_string(),
+            "--gid".to_string(),
+            gid.to_string(),
+        ]);
+    }
+
+    // Clear environment
+    args.push("--clearenv".into());
+
+    // Seccomp (added by caller via extra_args since it requires FD management)
+
+    // /proc and /dev
+    args.extend(["--proc", "/proc", "--dev", "/dev"].map(String::from));
+
+    // XDG_RUNTIME_DIR
+    if let Some(runtime_dir) = runtime_vars.get("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            args.push("--dir".into());
+            args.push(runtime_dir.clone());
+        }
+    }
+
+    // If /etc/netns/<ns>/hosts or resolv.conf is missing, preserve the host
+    // file as a fallback. The later static --ro-bind-try will override it when
+    // the namespace-specific file exists.
+    args.extend(netns_etc_fallback_args(config, "hosts", "/etc/hosts"));
+    args.extend(netns_etc_fallback_args(
+        config,
+        "resolv.conf",
+        "/etc/resolv.conf",
+    ));
+
+    // Static bwrap args (pre-computed by Nix: dirs, tmpfs, symlinks, store-path binds, env)
+    args.extend(config.static_bwrap_args.iter().cloned());
+
+    // Dynamic binds: resolve runtime variables and add
+    for bind in &config.dynamic_binds {
+        let src = vars::expand_vars(&bind.src, runtime_vars);
+        let dest = bind
+            .dest
+            .as_ref()
+            .map(|d| vars::expand_vars(d, runtime_vars))
+            .unwrap_or_else(|| src.clone());
+
+        let flag = bind_flag(bind.mode, bind.try_bind);
+        args.push(flag.into());
+        args.push(src);
+        args.push(dest);
+    }
+
+    // Extra args (passthrough env, zsh, ssh, pulse, wayland, gpu, dev, seccomp)
+    args.extend(extra_args);
+
+    // A pipe can fill before bwrap starts reading. A memfd holds the complete
+    // argument stream without a concurrent reader and is immutable after sealing.
+    let args_fd = memfd_create(
+        c"cloister-bwrap-args",
+        MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING,
+    )
+    .map_err(|e| io::Error::other(format!("memfd_create: {e}")))?;
+    let mut args_file = File::from(args_fd);
+    for arg in &args {
+        args_file.write_all(arg.as_bytes())?;
+        args_file.write_all(&[0])?;
+    }
+    args_file.rewind()?;
+    fcntl(
+        &args_file,
+        FcntlArg::F_ADD_SEALS(
+            SealFlag::F_SEAL_WRITE
+                | SealFlag::F_SEAL_GROW
+                | SealFlag::F_SEAL_SHRINK
+                | SealFlag::F_SEAL_SEAL,
+        ),
+    )
+    .map_err(|e| io::Error::other(format!("fcntl seal args: {e}")))?;
+    clear_cloexec(&args_file)?;
+    let raw_read = args_file.as_raw_fd();
+    let read_fd = OwnedFd::from(args_file);
+
+    // --- Build the real command line (visible in ps) ---
+    let mut cmd = Command::new(&config.bwrap_path);
+    cmd.args(["--args", &raw_read.to_string()]);
+
+    // --chdir stays on the real command line for debuggability
+    cmd.args(["--chdir", start_dir]);
+
+    // Terminate bwrap option processing so app flags aren't misinterpreted
+    cmd.arg("--");
+
+    // Inject tini inside the sandbox to handle signal forwarding and zombie
+    // reaping. bwrap stays as PID 1 in the new PID namespace, so tini runs as
+    // PID 2. Flags: -s registers as a child subreaper (required since tini is
+    // not PID 1), -g forwards signals to the child's entire process group.
+    if let Some(ref init_path) = config.init_path {
+        cmd.args([init_path.as_str(), "-sg", "--"]);
+    }
+
+    // The command to run inside the sandbox
+    cmd.args(run_cmd);
+
+    Ok((cmd, read_fd))
+}
+
+pub fn clear_cloexec<F: AsFd>(fd: &F) -> io::Result<()> {
+    let mut flags = fcntl(fd.as_fd(), FcntlArg::F_GETFD)
+        .map(FdFlag::from_bits_truncate)
+        .map_err(|e| io::Error::other(format!("fcntl getfd: {e}")))?;
+    flags.remove(FdFlag::FD_CLOEXEC);
+    fcntl(fd.as_fd(), FcntlArg::F_SETFD(flags))
+        .map_err(|e| io::Error::other(format!("fcntl setfd: {e}")))?;
+    Ok(())
+}
+
+fn netns_etc_fallback_args(config: &SandboxConfig, file_name: &str, dest: &str) -> Vec<String> {
+    if file_name == "resolv.conf" && config.network_dns_override {
+        return Vec::new();
+    }
+    let Some(ns) = config.network_namespace.as_deref() else {
+        return Vec::new();
+    };
+    let path = format!("/etc/netns/{ns}/{file_name}");
+    if Path::new(&path).is_file() {
+        return Vec::new();
+    }
+    vec!["--ro-bind".to_string(), dest.to_string(), dest.to_string()]
+}
+
+pub fn project_overlay_args(lower_path: &str, project_path: &str) -> Vec<String> {
+    vec![
+        "--overlay-src".to_string(),
+        lower_path.to_string(),
+        "--tmp-overlay".to_string(),
+        project_path.to_string(),
+    ]
+}
+
+pub fn delegated_per_dir_args(src: &str, dest: &str, mode: DelegatedAccessMode) -> Vec<String> {
+    match mode {
+        DelegatedAccessMode::Ro => vec!["--ro-bind".to_string(), src.to_string(), dest.to_string()],
+        DelegatedAccessMode::Rw => vec!["--bind".to_string(), src.to_string(), dest.to_string()],
+    }
+}
+
+/// Resolve $VAR references in a string using the runtime variable map.
+/// Map bind mode + try flag to the correct bwrap argument.
+fn bind_flag(mode: BindMode, try_bind: bool) -> &'static str {
+    match (mode, try_bind) {
+        (BindMode::Ro, false) => "--ro-bind",
+        (BindMode::Ro, true) => "--ro-bind-try",
+        (BindMode::Rw, false) => "--bind",
+        (BindMode::Rw, true) => "--bind-try",
+    }
+}
+
+/// Build the passthrough environment arguments.
+/// For each variable name in the list, if it's set in the host environment,
+/// add `--setenv <name> <value>` to the args.
+pub fn passthrough_env_args(var_names: &[String]) -> Vec<String> {
+    let mut args = Vec::new();
+    for name in var_names {
+        if let Ok(value) = std::env::var(name) {
+            if !value.is_empty() {
+                args.push("--setenv".to_string());
+                args.push(name.clone());
+                args.push(value);
+            }
+        }
+    }
+    args
+}
+
+/// Build ZDOTDIR forwarding args for zsh sandboxes.
+pub fn zdotdir_args(home: &str, sandbox_home: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Ok(zdotdir) = std::env::var("ZDOTDIR") {
+        if !zdotdir.is_empty() {
+            let dest = match std::path::Path::new(&zdotdir).strip_prefix(home) {
+                Ok(suffix) => std::path::Path::new(sandbox_home)
+                    .join(suffix)
+                    .to_string_lossy()
+                    .to_string(),
+                Err(_) => zdotdir.clone(),
+            };
+            args.push("--setenv".to_string());
+            args.push("ZDOTDIR".to_string());
+            args.push(dest.clone());
+            if std::path::Path::new(&zdotdir).is_dir() {
+                args.push("--ro-bind".to_string());
+                args.push(zdotdir);
+                args.push(dest);
+            }
+        }
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn resolve_vars_basic() {
+        let mut vars = HashMap::new();
+        vars.insert("HOME".to_string(), "/home/user".to_string());
+        vars.insert("DIR_HASH".to_string(), "abc123".to_string());
+
+        assert_eq!(
+            crate::vars::expand_vars("$HOME/.config", &vars),
+            "/home/user/.config"
+        );
+        assert_eq!(
+            crate::vars::expand_vars("/state/$DIR_HASH/data", &vars),
+            "/state/abc123/data"
+        );
+    }
+
+    #[test]
+    fn resolve_vars_no_match() {
+        let vars = HashMap::new();
+        assert_eq!(
+            crate::vars::expand_vars("/static/path", &vars),
+            "/static/path"
+        );
+    }
+
+    #[test]
+    fn bind_flag_mapping() {
+        assert_eq!(bind_flag(BindMode::Ro, false), "--ro-bind");
+        assert_eq!(bind_flag(BindMode::Ro, true), "--ro-bind-try");
+        assert_eq!(bind_flag(BindMode::Rw, false), "--bind");
+        assert_eq!(bind_flag(BindMode::Rw, true), "--bind-try");
+    }
+
+    #[test]
+    fn project_overlay_args_builds_overlay_mount() {
+        assert_eq!(
+            project_overlay_args("/run/cloister/project-lower", "/work/project"),
+            vec![
+                "--overlay-src",
+                "/run/cloister/project-lower",
+                "--tmp-overlay",
+                "/work/project",
+            ]
+        );
+    }
+
+    #[test]
+    fn delegated_per_dir_args_uses_ro_bind_for_read_only() {
+        assert_eq!(
+            delegated_per_dir_args("/src/project", "/dest/project", DelegatedAccessMode::Ro),
+            vec!["--ro-bind", "/src/project", "/dest/project"]
+        );
+    }
+
+    #[test]
+    fn delegated_per_dir_args_uses_bind_for_read_write() {
+        assert_eq!(
+            delegated_per_dir_args("/src/project", "/dest/project", DelegatedAccessMode::Rw),
+            vec!["--bind", "/src/project", "/dest/project"]
+        );
+    }
+
+    #[test]
+    fn passthrough_env_skips_unset() {
+        // CLOISTER_TEST_UNSET_VAR is presumably not set
+        let args = passthrough_env_args(&["CLOISTER_TEST_UNSET_VAR_12345".to_string()]);
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn zdotdir_remaps_only_under_home() {
+        let _guard = env_lock().lock().unwrap();
+        let original = std::env::var_os("ZDOTDIR");
+
+        std::env::set_var("ZDOTDIR", "/home/user/.config/zsh");
+        let args = zdotdir_args("/home/user", "/home/ubuntu");
+        assert!(args.contains(&"ZDOTDIR".to_string()));
+        assert!(args.contains(&"/home/ubuntu/.config/zsh".to_string()));
+
+        if let Some(val) = original {
+            std::env::set_var("ZDOTDIR", val);
+        } else {
+            std::env::remove_var("ZDOTDIR");
+        }
+    }
+
+    #[test]
+    fn zdotdir_does_not_remap_prefix_only() {
+        let _guard = env_lock().lock().unwrap();
+        let original = std::env::var_os("ZDOTDIR");
+
+        std::env::set_var("ZDOTDIR", "/home/user2/.config/zsh");
+        let args = zdotdir_args("/home/user", "/home/ubuntu");
+        assert!(args.contains(&"ZDOTDIR".to_string()));
+        assert!(args.contains(&"/home/user2/.config/zsh".to_string()));
+        assert!(!args.contains(&"/home/ubuntu2/.config/zsh".to_string()));
+
+        if let Some(val) = original {
+            std::env::set_var("ZDOTDIR", val);
+        } else {
+            std::env::remove_var("ZDOTDIR");
+        }
+    }
+
+    fn minimal_config() -> SandboxConfig {
+        let json = serde_json::json!({
+            "name": "test",
+            "bwrap_path": "/nix/store/xxx-bubblewrap/bin/bwrap",
+            "shell_bin": "/nix/store/xxx-zsh/bin/zsh",
+            "shell_interactive_args": ["-i"],
+            "wrapped_command_shell_args": ["-i"],
+            "shell_name": "zsh",
+            "home_directory": "/home/user",
+            "sandbox_home": "/home/user",
+            "per_dir": {},
+            "copy_file_base": "/home/user/.local/state/cloister",
+            "git_path": "/nix/store/xxx-git/bin/git",
+            "init_path": "/nix/store/xxx-tini/bin/tini",
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn anonymize_uses_configured_identity_for_hostname() {
+        let mut config = minimal_config();
+        config.anonymize = true;
+        config.sandbox_home = "/home/devuser".to_string();
+
+        let vars = HashMap::new();
+        let run_cmd = vec!["echo".to_string(), "hello".to_string()];
+        let (_cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/devuser", false)
+                .expect("build_bwrap_command failed");
+        let fd_args = read_args(args_fd);
+
+        assert!(
+            fd_args.windows(2).any(|w| w == ["--hostname", "devuser"]),
+            "expected anonymized hostname to be derived from config"
+        );
+    }
+
+    #[test]
+    fn anonymize_rejects_missing_identity_leaf() {
+        let mut config = minimal_config();
+        config.anonymize = true;
+        config.sandbox_home = "/home/".to_string();
+
+        let vars = HashMap::new();
+        let run_cmd = vec!["echo".to_string()];
+        let err = build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home", false)
+            .expect_err("expected invalid anonymized identity to fail");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("sandbox_home must end with a username")
+        );
+    }
+
+    #[test]
+    fn netns_hosts_fallback_added_when_netns_hosts_missing() {
+        let mut config = minimal_config();
+        config.network_namespace = Some("cloister-missing-netns-hosts-test".to_string());
+        assert_eq!(
+            netns_etc_fallback_args(&config, "hosts", "/etc/hosts"),
+            vec!["--ro-bind", "/etc/hosts", "/etc/hosts"]
+        );
+    }
+
+    #[test]
+    fn explicit_dns_skips_resolver_fallback_but_preserves_hosts_fallback() {
+        let mut config = minimal_config();
+        config.network_namespace = Some("cloister-missing-netns-dns-test".to_string());
+        config.network_dns_override = true;
+        assert!(netns_etc_fallback_args(&config, "resolv.conf", "/etc/resolv.conf").is_empty());
+        assert_eq!(
+            netns_etc_fallback_args(&config, "hosts", "/etc/hosts"),
+            vec!["--ro-bind", "/etc/hosts", "/etc/hosts"]
+        );
+    }
+
+    #[test]
+    fn netns_resolv_conf_fallback_added_when_missing() {
+        let mut config = minimal_config();
+        config.network_namespace = Some("cloister-missing-netns-resolv-test".to_string());
+        assert_eq!(
+            netns_etc_fallback_args(&config, "resolv.conf", "/etc/resolv.conf"),
+            vec!["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"]
+        );
+    }
+
+    #[test]
+    fn netns_hosts_fallback_precedes_static_netns_hosts_bind_try() {
+        let mut config = minimal_config();
+        config.network_namespace = Some("cloister-missing-netns-hosts-test".to_string());
+        config.static_bwrap_args = vec![
+            "--ro-bind-try".to_string(),
+            "/etc/netns/cloister-missing-netns-hosts-test/hosts".to_string(),
+            "/etc/hosts".to_string(),
+        ];
+
+        let vars = HashMap::new();
+        let run_cmd = vec!["echo".to_string(), "hello".to_string()];
+        let (_cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let fd_args = read_args(args_fd);
+
+        let fallback_pos = fd_args
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/etc/hosts", "/etc/hosts"])
+            .expect("fallback /etc/hosts bind not found");
+        let try_pos = fd_args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    "--ro-bind-try",
+                    "/etc/netns/cloister-missing-netns-hosts-test/hosts",
+                    "/etc/hosts",
+                ]
+            })
+            .expect("netns hosts --ro-bind-try not found");
+
+        assert!(fallback_pos < try_pos);
+    }
+
+    #[test]
+    fn netns_resolv_conf_fallback_precedes_static_netns_bind_try() {
+        let mut config = minimal_config();
+        config.network_namespace = Some("cloister-missing-netns-resolv-test".to_string());
+        config.static_bwrap_args = vec![
+            "--ro-bind-try".to_string(),
+            "/etc/netns/cloister-missing-netns-resolv-test/resolv.conf".to_string(),
+            "/etc/resolv.conf".to_string(),
+        ];
+
+        let vars = HashMap::new();
+        let run_cmd = vec!["echo".to_string(), "hello".to_string()];
+        let (_cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let fd_args = read_args(args_fd);
+
+        let fallback_pos = fd_args
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"])
+            .expect("fallback /etc/resolv.conf bind not found");
+        let try_pos = fd_args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    "--ro-bind-try",
+                    "/etc/netns/cloister-missing-netns-resolv-test/resolv.conf",
+                    "/etc/resolv.conf",
+                ]
+            })
+            .expect("netns resolv.conf --ro-bind-try not found");
+
+        assert!(fallback_pos < try_pos);
+    }
+
+    #[test]
+    fn bwrap_command_uses_args_fd() {
+        let config = minimal_config();
+        let vars = HashMap::new();
+        let run_cmd = vec!["helium".to_string(), "-ozone-platform=wayland".to_string()];
+        let (cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let cmd_args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+
+        // The real command line should contain --args <fd>
+        let args_pos = cmd_args
+            .iter()
+            .position(|&a| a == "--args")
+            .expect("--args not found");
+        let fd_str = cmd_args[args_pos + 1];
+        assert_eq!(fd_str, args_fd.as_raw_fd().to_string());
+
+        // --, tini, and run command should still be on the real command line
+        let dash_pos = cmd_args
+            .iter()
+            .position(|&a| a == "--")
+            .expect("-- not found");
+        assert_eq!(
+            &cmd_args[dash_pos + 1..],
+            &[
+                "/nix/store/xxx-tini/bin/tini",
+                "-sg",
+                "--",
+                "helium",
+                "-ozone-platform=wayland"
+            ]
+        );
+
+        // Read the memfd and verify NUL-separated bwrap options
+        use std::io::Read;
+        let mut args_file = File::from(args_fd);
+        let mut content = Vec::new();
+        args_file.read_to_end(&mut content).unwrap();
+        let fd_args: Vec<&str> = content
+            .strip_suffix(&[0])
+            .unwrap()
+            .split(|&b| b == 0)
+            .map(|s| std::str::from_utf8(s).unwrap())
+            .collect();
+
+        // Core isolation flags should be in the memfd
+        assert!(fd_args.contains(&"--die-with-parent"));
+        assert!(fd_args.contains(&"--unshare-all"));
+        assert!(fd_args.contains(&"--clearenv"));
+        assert!(fd_args.contains(&"--proc"));
+
+        // --chdir should NOT be in the memfd (it stays on the real command line)
+        assert!(!fd_args.contains(&"--chdir"));
+    }
+
+    #[test]
+    fn explicit_overlay_extra_args_do_not_imply_bind_suppression() {
+        let mut config = minimal_config();
+        config.dynamic_binds.push(crate::config::DynamicBind {
+            src: "$SANDBOX_DIR".to_string(),
+            dest: Some("$SANDBOX_DEST".to_string()),
+            mode: crate::config::BindMode::Rw,
+            try_bind: false,
+        });
+
+        let vars = HashMap::from([
+            ("SANDBOX_DIR".to_string(), "/host/project".to_string()),
+            ("SANDBOX_DEST".to_string(), "/workspace/project".to_string()),
+        ]);
+        let run_cmd = vec!["echo".to_string(), "hello".to_string()];
+        let (_cmd, args_fd) = build_bwrap_command(
+            &config,
+            &vars,
+            vec![
+                "--overlay-src".to_string(),
+                "/host/project".to_string(),
+                "--tmp-overlay".to_string(),
+                "/workspace/project".to_string(),
+            ],
+            &run_cmd,
+            "/workspace/project",
+            false,
+        )
+        .expect("build_bwrap_command failed");
+        let fd_args = read_args(args_fd);
+
+        assert!(fd_args.windows(3).any(|w| {
+            w == ["--bind", "/host/project", "/workspace/project"]
+                || w == ["--ro-bind", "/host/project", "/workspace/project"]
+        }));
+        assert!(
+            fd_args
+                .windows(2)
+                .any(|w| w == ["--overlay-src", "/host/project"])
+        );
+        assert!(
+            fd_args
+                .windows(2)
+                .any(|w| w == ["--tmp-overlay", "/workspace/project"])
+        );
+    }
+
+    /// Helper to read NUL-separated args from the memfd returned by `build_bwrap_command`.
+    fn read_args(fd: OwnedFd) -> Vec<String> {
+        use std::io::Read;
+        let mut args_file = File::from(fd);
+        let mut content = Vec::new();
+        args_file.read_to_end(&mut content).unwrap();
+        content
+            .strip_suffix(&[0])
+            .unwrap()
+            .split(|&b| b == 0)
+            .map(|s| std::str::from_utf8(s).unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn large_argument_stream_is_sealed_and_inherited() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut config = minimal_config();
+            let extra = vec![
+                "x".repeat(256 * 1024),
+                String::new(),
+                "last".into(),
+                String::new(),
+            ];
+            let (_, baseline_fd) =
+                build_bwrap_command(&config, &HashMap::new(), vec![], &[], "/tmp", false).unwrap();
+            let mut expected = read_args(baseline_fd);
+            expected.extend(extra.clone());
+            config.static_bwrap_args = extra;
+            let (_, fd) =
+                build_bwrap_command(&config, &HashMap::new(), vec![], &[], "/tmp", false).unwrap();
+            assert_eq!(fcntl(&fd, FcntlArg::F_GETFD).unwrap() & libc::FD_CLOEXEC, 0);
+            let seals = fcntl(&fd, FcntlArg::F_GET_SEALS).unwrap();
+            assert_eq!(
+                seals,
+                (SealFlag::F_SEAL_WRITE
+                    | SealFlag::F_SEAL_GROW
+                    | SealFlag::F_SEAL_SHRINK
+                    | SealFlag::F_SEAL_SEAL)
+                    .bits()
+            );
+            let mut file = File::from(fd);
+            assert!(file.write_all(b"changed").is_err());
+            // An exec child must inherit the descriptor and see the exact bytes.
+            let output = Command::new("sh")
+                .args(["-c", &format!("cat <&{}", file.as_raw_fd())])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let expected_bytes: Vec<u8> = expected
+                .iter()
+                .flat_map(|arg| arg.bytes().chain(std::iter::once(0)))
+                .collect();
+            assert_eq!(output.stdout, expected_bytes);
+            file.rewind().unwrap();
+            assert_eq!(read_args(file.into()), expected);
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("argument construction or round-trip did not finish");
+    }
+
+    #[test]
+    fn new_session_present_when_non_interactive() {
+        let config = minimal_config();
+        let vars = HashMap::new();
+        let run_cmd = vec!["echo".to_string(), "hello".to_string()];
+        let (_cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let fd_args = read_args(args_fd);
+        assert!(fd_args.contains(&"--new-session".to_string()));
+    }
+
+    #[test]
+    fn tini_prepended_to_command() {
+        let config = minimal_config();
+        let vars = HashMap::new();
+        let run_cmd = vec!["helium".to_string()];
+        let (cmd, _args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let cmd_args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+
+        let dash_pos = cmd_args
+            .iter()
+            .position(|&a| a == "--")
+            .expect("-- not found");
+        assert_eq!(
+            &cmd_args[dash_pos + 1..],
+            &["/nix/store/xxx-tini/bin/tini", "-sg", "--", "helium"]
+        );
+    }
+
+    #[test]
+    fn tini_absent_when_not_configured() {
+        let mut config = minimal_config();
+        config.init_path = None;
+        let vars = HashMap::new();
+        let run_cmd = vec!["helium".to_string()];
+        let (cmd, _args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", false)
+                .expect("build_bwrap_command failed");
+        let cmd_args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+
+        let dash_pos = cmd_args
+            .iter()
+            .position(|&a| a == "--")
+            .expect("-- not found");
+        // With no init_path, the run command follows -- directly
+        assert_eq!(&cmd_args[dash_pos + 1..], &["helium"]);
+    }
+
+    #[test]
+    fn new_session_absent_when_interactive() {
+        let config = minimal_config();
+        let vars = HashMap::new();
+        let run_cmd = vec!["/nix/store/xxx-zsh/bin/zsh".to_string(), "-i".to_string()];
+        let (_cmd, args_fd) =
+            build_bwrap_command(&config, &vars, vec![], &run_cmd, "/home/user", true)
+                .expect("build_bwrap_command failed");
+        let fd_args = read_args(args_fd);
+        assert!(!fd_args.contains(&"--new-session".to_string()));
+    }
+}
