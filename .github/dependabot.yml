@@ -1,47 +1,51 @@
 ---
 version: 2
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: weekly
 updates:
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-dbus-validate
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-netns
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-pipewire-validate
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-sandbox
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-sandbox/cloister-sandbox-bin
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-sandbox/cloister-sandbox-lib
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-seccomp-filter
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-seccomp-validate
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
     directory: /helpers/cloister-wayland-validate
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
   - package-ecosystem: nix
     directory: /
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
