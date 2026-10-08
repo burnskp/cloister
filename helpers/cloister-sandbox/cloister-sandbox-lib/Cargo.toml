@@ -6,7 +6,7 @@ wayrs-protocols = {version = "0.14", features = ["security-context-v1"]}
 sha2 = {version = "0.10", default-features = false, features = ["std"]}
 base64ct = {version = "1", default-features = false, features = ["std"]}
 # Unix primitives
-nix = {version = "0.30.1", default-features = false, features = ["fs", "net"]}
+nix = {version = "0.31.3", default-features = false, features = ["fs", "net"]}
 libc = "0.2"
 # Config deserialization
 serde = {version = "1", features = ["derive"]}
