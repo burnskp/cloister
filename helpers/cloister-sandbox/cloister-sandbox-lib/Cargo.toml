@@ -3,7 +3,7 @@
 wayrs-client = "1.1"
 wayrs-protocols = {version = "0.14", features = ["security-context-v1"]}
 # SSH agent protocol
-sha2 = {version = "0.10", default-features = false, features = ["std"]}
+sha2 = {version = "0.11", default-features = false, features = ["std"]}
 base64ct = {version = "1", default-features = false, features = ["std"]}
 # Unix primitives
 nix = {version = "0.30.1", default-features = false, features = ["fs", "net"]}
