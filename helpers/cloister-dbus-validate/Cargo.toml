@@ -1,5 +1,5 @@
 [dependencies]
-zbus = {version = "=5.19.0", default-features = false, features = ["tokio"]}
+zbus = {version = "=6.0.0", default-features = false, features = ["tokio", "proxy"]}
 tokio = {version = "1.52", features = ["rt-multi-thread", "macros"]}
 
 [package]

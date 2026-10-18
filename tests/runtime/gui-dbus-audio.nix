@@ -181,6 +181,22 @@ pkgs.testers.runNixOSTest (_: {
     wait_until_contains(proxy_list_cmd, "org.example.Service", "proxy bus exposes allowed service")
     wait_until_contains(proxy_list_cmd, "org.freedesktop.portal.Desktop", "proxy bus exposes portal service")
     assert_not_contains(machine, proxy_list_cmd, "org.example.Secret", "proxy bus hides denied service")
+    for list_cmd, expected_status in [(raw_list_cmd, 1), (proxy_list_cmd, 0)]:
+        status, output = machine.execute(
+            list_cmd + " --validate --deny org.example.Secret --json"
+        )
+        assert status == expected_status, output
+        validation = json.loads(output)
+        assert validation["pass"] == (expected_status == 0), validation
+        assert validation["exposed_denied"] == (
+            ["org.example.Secret"] if expected_status == 1 else []
+        ), validation
+
+        listing = json.loads(machine.succeed(list_cmd + " --activatable --json"))
+        assert isinstance(listing["names"], list), listing
+        assert isinstance(listing["activatable"], list), listing
+        assert "org.example.Service" in listing["names"], listing
+
     machine.succeed(
         "${pkgs.util-linux}/bin/runuser -u tester -- env DBUS_SESSION_BUS_ADDRESS=" + proxy_bus + " "
         + "${pkgs.dbus}/bin/dbus-send --session --dest=org.example.Service / org.freedesktop.DBus.Peer.Ping"
