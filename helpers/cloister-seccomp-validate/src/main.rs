@@ -17,13 +17,16 @@ macro_rules! sys_nr {
 /// Resolve a syscall number that only exists on x86_64.
 #[cfg(target_arch = "x86_64")]
 macro_rules! sys_nr_x86 {
+    ($nr:literal) => {
+        Some($nr as i64)
+    };
     ($name:ident) => {
         Some(libc::$name as i64)
     };
 }
 #[cfg(not(target_arch = "x86_64"))]
 macro_rules! sys_nr_x86 {
-    ($name:ident) => {
+    ($nr:tt) => {
         None
     };
 }
@@ -413,7 +416,9 @@ fn syscall_table() -> Vec<SyscallEntry> {
         },
         SyscallEntry {
             name: "create_module",
-            nr: sys_nr_x86!(SYS_create_module),
+            // libc omits these obsolete module syscalls. Keep their x86_64 ABI
+            // numbers from Linux arch/x86/entry/syscalls/syscall_64.tbl.
+            nr: sys_nr_x86!(174),
             category: Category::Obsolete,
         },
         SyscallEntry {
@@ -423,7 +428,7 @@ fn syscall_table() -> Vec<SyscallEntry> {
         },
         SyscallEntry {
             name: "get_kernel_syms",
-            nr: sys_nr_x86!(SYS_get_kernel_syms),
+            nr: sys_nr_x86!(177),
             category: Category::Obsolete,
         },
         SyscallEntry {
@@ -433,7 +438,7 @@ fn syscall_table() -> Vec<SyscallEntry> {
         },
         SyscallEntry {
             name: "query_module",
-            nr: sys_nr_x86!(SYS_query_module),
+            nr: sys_nr_x86!(178),
             category: Category::Obsolete,
         },
         SyscallEntry {

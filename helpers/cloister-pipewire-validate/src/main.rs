@@ -238,7 +238,7 @@ fn collect_status(
 
         let remaining = timeout - elapsed;
         let step = remaining.min(Duration::from_millis(100));
-        let result = mainloop.loop_().iterate(step);
+        let result = mainloop.loop_().iterate(pw::loop_::Timeout::Finite(step));
         if result < 0 {
             return Err(format!(
                 "PipeWire loop error while waiting for registry sync: {result}\n{}",
