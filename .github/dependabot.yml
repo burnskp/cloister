@@ -22,15 +22,8 @@ updates:
     patterns: ["*"]
     multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
+    # Scan the workspace once so member manifests share one lockfile update.
     directory: /helpers/cloister-sandbox
-    patterns: ["*"]
-    multi-ecosystem-group: dependencies
-  - package-ecosystem: cargo
-    directory: /helpers/cloister-sandbox/cloister-sandbox-bin
-    patterns: ["*"]
-    multi-ecosystem-group: dependencies
-  - package-ecosystem: cargo
-    directory: /helpers/cloister-sandbox/cloister-sandbox-lib
     patterns: ["*"]
     multi-ecosystem-group: dependencies
   - package-ecosystem: cargo
