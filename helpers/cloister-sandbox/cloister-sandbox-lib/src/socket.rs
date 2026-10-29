@@ -115,19 +115,48 @@ pub fn remove_stale_socket(path: &str) -> Result<(), String> {
 }
 
 /// Bind a Unix listening socket with restrictive permissions (0o600).
-/// Removes any stale socket first, then sets permissions on the path.
-/// Thread-safe: no process-global state (umask) is touched.
-/// The brief window between bind and chmod is mitigated by
-/// validate_socket_parent (parent dir is user-owned, mode 0700).
+/// Removes any stale socket first. Thread-safe: no process-global state
+/// (umask) is touched.
+///
+/// The socket is bound inside a private 0700 staging directory, restricted to
+/// 0600, and only then renamed to `path`, so other users never see it while
+/// its mode is still governed by the umask. The parent of `path` may be
+/// traversable by others; validate_socket_parent only rejects writable ones.
 pub fn bind_socket_restricted(path: &str) -> io::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     validate_socket_parent(path).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
 
     remove_stale_socket(path).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
 
-    let listener = std::os::unix::net::UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    let socket_path = Path::new(path);
+    let parent = socket_path
+        .parent()
+        .ok_or_else(|| io::Error::other(format!("socket path has no parent: {path}")))?;
+    let file_name = socket_path
+        .file_name()
+        .ok_or_else(|| io::Error::other(format!("socket path has no file name: {path}")))?;
+    let staging = parent.join(format!(
+        ".{}.staging-{}-{}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::DirBuilder::new().mode(0o700).create(&staging)?;
+    let staged = staging.join("sock");
 
-    Ok(listener)
+    let result = (|| {
+        let listener = std::os::unix::net::UnixListener::bind(&staged)?;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&staged, socket_path)?;
+        Ok(listener)
+    })();
+
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_dir(&staging);
+    result
 }
 
 #[cfg(test)]
@@ -211,6 +240,10 @@ mod tests {
         let listener = bind_socket_restricted(sock_path.to_str().unwrap()).unwrap();
         let meta = std::fs::metadata(&sock_path).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        // The staging directory is gone and the listener answers at `path`.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::os::unix::net::UnixStream::connect(&sock_path).unwrap();
+        listener.accept().unwrap();
         drop(listener);
         let _ = std::fs::remove_file(&sock_path);
         let _ = std::fs::remove_dir(&dir);
