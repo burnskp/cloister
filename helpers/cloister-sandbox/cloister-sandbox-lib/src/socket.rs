@@ -114,6 +114,9 @@ pub fn remove_stale_socket(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Size of `sockaddr_un.sun_path`; a bindable path must leave room for the NUL.
+const SUN_PATH_MAX: usize = 108;
+
 /// Bind a Unix listening socket with restrictive permissions (0o600).
 /// Removes any stale socket first. Thread-safe: no process-global state
 /// (umask) is touched.
@@ -122,6 +125,10 @@ pub fn remove_stale_socket(path: &str) -> Result<(), String> {
 /// 0600, and only then renamed to `path`, so other users never see it while
 /// its mode is still governed by the umask. The parent of `path` may be
 /// traversable by others; validate_socket_parent only rejects writable ones.
+///
+/// The staged path is longer than `path`, so when it would overflow
+/// `sun_path` the bind goes through `/proc/self/fd/<staging dirfd>/sock`
+/// instead, which keeps every `path` that fits the limit bindable.
 pub fn bind_socket_restricted(path: &str) -> io::Result<std::os::unix::net::UnixListener> {
     use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -148,7 +155,18 @@ pub fn bind_socket_restricted(path: &str) -> io::Result<std::os::unix::net::Unix
     let staged = staging.join("sock");
 
     let result = (|| {
-        let listener = std::os::unix::net::UnixListener::bind(&staged)?;
+        let listener = if staged.as_os_str().len() < SUN_PATH_MAX {
+            std::os::unix::net::UnixListener::bind(&staged)?
+        } else {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::OpenOptionsExt;
+            let dir = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&staging)?;
+            let short = format!("/proc/self/fd/{}/sock", dir.as_raw_fd());
+            std::os::unix::net::UnixListener::bind(short)?
+        };
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))?;
         std::fs::rename(&staged, socket_path)?;
         Ok(listener)
@@ -241,6 +259,28 @@ mod tests {
         let meta = std::fs::metadata(&sock_path).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         // The staging directory is gone and the listener answers at `path`.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::os::unix::net::UnixStream::connect(&sock_path).unwrap();
+        listener.accept().unwrap();
+        drop(listener);
+        let _ = std::fs::remove_file(&sock_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn bind_socket_restricted_handles_path_at_sun_path_limit() {
+        let dir = make_temp_dir("cloister-socket");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Pad the file name so the final path is exactly SUN_PATH_MAX - 1 bytes,
+        // which leaves no room for the staging directory component.
+        let prefix_len = dir.as_os_str().len() + 1;
+        assert!(prefix_len < SUN_PATH_MAX - 1);
+        let sock_path = dir.join("s".repeat(SUN_PATH_MAX - 1 - prefix_len));
+        assert_eq!(sock_path.as_os_str().len(), SUN_PATH_MAX - 1);
+
+        let listener = bind_socket_restricted(sock_path.to_str().unwrap()).unwrap();
+        let meta = std::fs::metadata(&sock_path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::os::unix::net::UnixStream::connect(&sock_path).unwrap();
         listener.accept().unwrap();

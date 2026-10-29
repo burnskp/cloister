@@ -272,12 +272,22 @@ mod tests {
         client
     }
 
+    /// Assert the proxy closed the session: EOF or reset, never a read timeout
+    /// (which would mean the connection is still open but idle).
+    fn assert_closed(client: &mut UnixStream, what: &str) {
+        match read_message(client) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                ) => {}
+            other => panic!("{what}: expected EOF or reset, got {other:?}"),
+        }
+    }
+
     fn assert_failure_then_closed(client: &mut UnixStream) {
         assert_eq!(read_message(client).unwrap(), vec![FAILURE_BYTE]);
-        assert!(
-            read_message(client).is_err(),
-            "proxy should close the session"
-        );
+        assert_closed(client, "proxy should close the session");
     }
 
     #[test]
@@ -305,9 +315,9 @@ mod tests {
         write_message(&mut client, &[SSH_AGENTC_REQUEST_IDENTITIES]).unwrap();
         assert_eq!(read_message(&mut client).unwrap(), vec![FAILURE_BYTE]);
         let _ = write_message(&mut client, &build_sign_request(KEY_BLOB, b"data"));
-        assert!(
-            read_message(&mut client).is_err(),
-            "proxy should close the session after an upstream timeout"
+        assert_closed(
+            &mut client,
+            "proxy should close the session after an upstream timeout",
         );
     }
 
