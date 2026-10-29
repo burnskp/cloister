@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 pub const SSH_AGENTC_REQUEST_IDENTITIES: u8 = 11;
 pub const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
 pub const SSH_AGENTC_SIGN_REQUEST: u8 = 13;
+pub const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
 pub const FAILURE_BYTE: u8 = 5;
 pub const SSH_AGENT_FAILURE: &[u8] = &[0, 0, 0, 1, FAILURE_BYTE];
 
