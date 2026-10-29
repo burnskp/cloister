@@ -289,15 +289,16 @@ fn build_filter(
         const PR_CAP_AMBIENT: u64 = 47;
         const PR_CAP_AMBIENT_RAISE: u64 = 2;
 
+        // The kernel reads the prctl option as a 32-bit int, so compare only the
+        // low 32 bits; otherwise setting high bits would slip past these rules.
+        let option_is =
+            |option: u64| ScmpArgCompare::new(0, ScmpCompareOp::MaskedEqual(0xFFFF_FFFF), option);
+
         // Block PR_SET_SECUREBITS — prevents manipulation of capability securebits
         filter.add_rule_conditional(
             errno_action,
             prctl_syscall,
-            &[ScmpArgCompare::new(
-                0,
-                ScmpCompareOp::Equal,
-                PR_SET_SECUREBITS,
-            )],
+            &[option_is(PR_SET_SECUREBITS)],
         )?;
 
         // Block PR_CAP_AMBIENT with PR_CAP_AMBIENT_RAISE — prevents re-gaining ambient capabilities
@@ -305,7 +306,7 @@ fn build_filter(
             errno_action,
             prctl_syscall,
             &[
-                ScmpArgCompare::new(0, ScmpCompareOp::Equal, PR_CAP_AMBIENT),
+                option_is(PR_CAP_AMBIENT),
                 ScmpArgCompare::new(1, ScmpCompareOp::Equal, PR_CAP_AMBIENT_RAISE),
             ],
         )?;
@@ -322,7 +323,7 @@ fn build_filter(
                 errno_action,
                 prctl_syscall,
                 &[
-                    ScmpArgCompare::new(0, ScmpCompareOp::Equal, PR_SET_DUMPABLE),
+                    option_is(PR_SET_DUMPABLE),
                     ScmpArgCompare::new(1, ScmpCompareOp::Equal, SUID_DUMP_USER),
                 ],
             )?;
@@ -482,13 +483,13 @@ mod tests {
     #[test]
     fn default_filter_blocks_pr_set_dumpable_restore() {
         let pfc = export_filter_pfc(false, false);
+        let prctl = pfc_syscall_block(&pfc, "prctl");
 
         assert!(
-            pfc.contains("prctl")
-                && pfc.contains("$a0.lo32 == 4")
-                && pfc.contains("$a1.lo32 == 1")
-                && pfc.contains("ERRNO(38)"),
-            "default filter should block prctl(PR_SET_DUMPABLE, 1); got:\n{pfc}"
+            prctl.contains("$a0.lo32 & 0xffffffff == 4)")
+                && prctl.contains("$a1.lo32 == 1")
+                && prctl.contains("ERRNO(38)"),
+            "default filter should block prctl(PR_SET_DUMPABLE, 1); got:\n{prctl}"
         );
     }
 
@@ -524,15 +525,43 @@ mod tests {
         );
     }
 
+    /// The PFC text of the per-syscall block for `name`.
+    fn pfc_syscall_block<'a>(pfc: &'a str, name: &str) -> &'a str {
+        let header = format!("# filter for syscall \"{name}\"");
+        let start = pfc
+            .find(&header)
+            .unwrap_or_else(|| panic!("no filter block for {name}; got:\n{pfc}"));
+        let rest = &pfc[start + header.len()..];
+        let end = rest.find("# filter for syscall").unwrap_or(rest.len());
+        &pfc[start..start + header.len() + end]
+    }
+
+    #[test]
+    fn prctl_option_rules_ignore_upper_32_bits() {
+        for allow_chromium_sandbox in [false, true] {
+            let pfc = export_filter_pfc(allow_chromium_sandbox, false);
+            let prctl = pfc_syscall_block(&pfc, "prctl");
+
+            assert!(
+                !prctl.contains("$a0.hi32 == 0") && prctl.contains("$a0.hi32 & 0x00000000 == 0"),
+                "prctl option comparisons must only inspect the low 32 bits; got:\n{prctl}"
+            );
+            assert!(
+                prctl.contains("$a0.lo32 & 0xffffffff == 28")
+                    && prctl.contains("$a0.lo32 & 0xffffffff == 47"),
+                "prctl filter should still block PR_SET_SECUREBITS and PR_CAP_AMBIENT; got:\n{prctl}"
+            );
+        }
+    }
+
     #[test]
     fn chromium_filter_allows_pr_set_dumpable_restore() {
         let pfc = export_filter_pfc(true, false);
+        let prctl = pfc_syscall_block(&pfc, "prctl");
 
         assert!(
-            !(pfc.contains("prctl")
-                && pfc.contains("$a0.lo32 == 4")
-                && pfc.contains("$a1.lo32 == 1")),
-            "allow-chromium-sandbox filter should not block prctl(PR_SET_DUMPABLE, 1); got:\n{pfc}"
+            !prctl.contains("$a0.lo32 & 0xffffffff == 4)"),
+            "allow-chromium-sandbox filter should not block prctl(PR_SET_DUMPABLE, 1); got:\n{prctl}"
         );
     }
 }
