@@ -45,6 +45,55 @@ fn classify(interface: &str) -> &'static str {
     }
 }
 
+/// Widest interface name shown in the report; longer names are truncated.
+const MAX_NAME_WIDTH: usize = 64;
+
+/// Most advertised globals listed individually; the rest are summarized.
+const MAX_LISTED_GLOBALS: usize = 256;
+
+/// Render a peer-supplied interface name for single-line terminal output:
+/// control characters are escaped and the result is capped at `MAX_NAME_WIDTH`.
+fn display_name(interface: &str) -> String {
+    let mut out = String::new();
+    for c in interface.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    if out.chars().count() > MAX_NAME_WIDTH {
+        out = out.chars().take(MAX_NAME_WIDTH - 1).collect();
+        out.push('\u{2026}');
+    }
+    out
+}
+
+/// Report lines for the advertised-globals section, at most
+/// `MAX_LISTED_GLOBALS` entries plus a summary of any omitted ones.
+fn global_lines(globals: &[GlobalInfo], width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = globals
+        .iter()
+        .take(MAX_LISTED_GLOBALS)
+        .map(|g| {
+            let name = display_name(&g.interface);
+            let tag = classify(&g.interface);
+            if tag.is_empty() {
+                format!("  {:<width$} v{}", name, g.version)
+            } else {
+                format!("  {:<width$} v{:<4} {}", name, g.version, tag)
+            }
+        })
+        .collect();
+    if globals.len() > MAX_LISTED_GLOBALS {
+        lines.push(format!(
+            "  \u{2026} {} more globals omitted",
+            globals.len() - MAX_LISTED_GLOBALS
+        ));
+    }
+    lines
+}
+
 struct GlobalInfo {
     interface: String,
     version: u32,
@@ -58,24 +107,21 @@ fn validate(globals: &[GlobalInfo]) -> bool {
 
     let width = globals
         .iter()
-        .map(|g| g.interface.len())
+        .take(MAX_LISTED_GLOBALS)
+        .map(|g| display_name(&g.interface).chars().count())
         .chain(PRIVILEGED.iter().map(|s| s.len()))
         .chain(CORE.iter().map(|s| s.len()))
         .max()
-        .unwrap_or(40);
+        .unwrap_or(40)
+        .min(MAX_NAME_WIDTH);
 
     // Section 1: list all advertised globals
     eprintln!(
         "\u{2500}\u{2500} Advertised globals ({} total) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
         globals.len()
     );
-    for g in globals {
-        let tag = classify(&g.interface);
-        if tag.is_empty() {
-            eprintln!("  {:<width$} v{}", g.interface, g.version);
-        } else {
-            eprintln!("  {:<width$} v{:<4} {}", g.interface, g.version, tag);
-        }
+    for line in global_lines(globals, width) {
+        eprintln!("{line}");
     }
 
     // Section 2: check privileged protocols
@@ -172,6 +218,35 @@ mod tests {
             interface: interface.to_string(),
             version,
         }
+    }
+
+    #[test]
+    fn display_name_escapes_control_characters() {
+        assert_eq!(display_name("wl_shm"), "wl_shm");
+        assert_eq!(display_name("evil\nRESULT: PASS"), "evil\\nRESULT: PASS");
+        assert_eq!(display_name("x\u{1b}[2J"), "x\\u{1b}[2J");
+    }
+
+    #[test]
+    fn display_name_truncates_long_names() {
+        let name = display_name(&"a".repeat(10_000));
+        assert_eq!(name.chars().count(), MAX_NAME_WIDTH);
+        assert!(name.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn global_lines_caps_rows_and_width() {
+        let mut globals = vec![g(&"a".repeat(10_000), 1)];
+        globals.extend((0..1000).map(|_| g("wl_shm", 1)));
+
+        let lines = global_lines(&globals, MAX_NAME_WIDTH);
+        assert_eq!(lines.len(), MAX_LISTED_GLOBALS + 1);
+        assert!(lines.last().unwrap().contains("745 more globals omitted"));
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.chars().count() < MAX_NAME_WIDTH + 32)
+        );
     }
 
     #[test]

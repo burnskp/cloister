@@ -202,11 +202,16 @@ pub fn project_overlay_args(lower_path: &str, project_path: &str) -> Vec<String>
     ]
 }
 
-pub fn delegated_per_dir_args(src: &str, dest: &str, mode: DelegatedAccessMode) -> Vec<String> {
-    match mode {
-        DelegatedAccessMode::Ro => vec!["--ro-bind".to_string(), src.to_string(), dest.to_string()],
-        DelegatedAccessMode::Rw => vec!["--bind".to_string(), src.to_string(), dest.to_string()],
-    }
+pub fn delegated_per_dir_args(
+    src_fd: std::os::fd::RawFd,
+    dest: &str,
+    mode: DelegatedAccessMode,
+) -> Vec<String> {
+    let flag = match mode {
+        DelegatedAccessMode::Ro => "--ro-bind-fd",
+        DelegatedAccessMode::Rw => "--bind-fd",
+    };
+    vec![flag.to_string(), src_fd.to_string(), dest.to_string()]
 }
 
 /// Resolve $VAR references in a string using the runtime variable map.
@@ -321,16 +326,16 @@ mod tests {
     #[test]
     fn delegated_per_dir_args_uses_ro_bind_for_read_only() {
         assert_eq!(
-            delegated_per_dir_args("/src/project", "/dest/project", DelegatedAccessMode::Ro),
-            vec!["--ro-bind", "/src/project", "/dest/project"]
+            delegated_per_dir_args(7, "/dest/project", DelegatedAccessMode::Ro),
+            vec!["--ro-bind-fd", "7", "/dest/project"]
         );
     }
 
     #[test]
     fn delegated_per_dir_args_uses_bind_for_read_write() {
         assert_eq!(
-            delegated_per_dir_args("/src/project", "/dest/project", DelegatedAccessMode::Rw),
-            vec!["--bind", "/src/project", "/dest/project"]
+            delegated_per_dir_args(7, "/dest/project", DelegatedAccessMode::Rw),
+            vec!["--bind-fd", "7", "/dest/project"]
         );
     }
 

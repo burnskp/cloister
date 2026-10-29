@@ -72,22 +72,41 @@ pub fn handle_client(
             return;
         }
 
+        // After a failed or partial upstream exchange, a late reply could still
+        // arrive and be paired with the next request, so the session ends.
         let msg_type = msg[0];
         let response = match msg_type {
             SSH_AGENTC_REQUEST_IDENTITIES => match forward_to_upstream(&mut upstream, &msg) {
                 Ok(resp) => filter_identities(&resp, allowed),
                 Err(e) => {
                     eprintln!("cloister-ssh-filter: upstream forward: {e}");
-                    vec![FAILURE_BYTE]
+                    let _ = send_failure(&mut client);
+                    return;
                 }
             },
             SSH_AGENTC_SIGN_REQUEST => {
                 if is_sign_allowed(&msg, allowed) {
                     match forward_to_upstream(&mut upstream, &msg) {
-                        Ok(resp) => resp,
+                        Ok(resp)
+                            if matches!(
+                                resp.first(),
+                                Some(&SSH_AGENT_SIGN_RESPONSE) | Some(&FAILURE_BYTE)
+                            ) =>
+                        {
+                            resp
+                        }
+                        Ok(resp) => {
+                            eprintln!(
+                                "cloister-ssh-filter: unexpected upstream sign response type {:?}",
+                                resp.first()
+                            );
+                            let _ = send_failure(&mut client);
+                            return;
+                        }
                         Err(e) => {
                             eprintln!("cloister-ssh-filter: upstream forward: {e}");
-                            vec![FAILURE_BYTE]
+                            let _ = send_failure(&mut client);
+                            return;
                         }
                     }
                 } else {
@@ -214,6 +233,107 @@ fn listener_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const KEY_BLOB: &[u8] = b"test-key-blob";
+
+    /// Run `handle_client` against a fake upstream agent that answers each
+    /// request with the next entry of `replies`, after the given delay.
+    fn run_against_upstream(
+        name: &str,
+        replies: Vec<(Duration, Vec<u8>)>,
+        timeout: Duration,
+    ) -> UnixStream {
+        let dir = std::env::temp_dir().join(format!("cloister-ssh-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let upstream_path = dir.join("agent.sock");
+        let upstream = UnixListener::bind(&upstream_path).unwrap();
+
+        thread::spawn(move || {
+            let (mut conn, _) = upstream.accept().unwrap();
+            for (delay, reply) in replies {
+                if read_message(&mut conn).is_err() {
+                    return;
+                }
+                thread::sleep(delay);
+                if write_message(&mut conn, &reply).is_err() {
+                    return;
+                }
+            }
+            // Keep the upstream open so EOF on the client means the proxy closed it.
+            thread::sleep(timeout * 4);
+        });
+
+        let (client, proxy_end) = UnixStream::pair().unwrap();
+        let upstream_path = upstream_path.to_str().unwrap().to_string();
+        let allowed = vec![fingerprint(KEY_BLOB)];
+        thread::spawn(move || handle_client(proxy_end, &upstream_path, &allowed, Some(timeout)));
+        client.set_read_timeout(Some(timeout * 8)).unwrap();
+        client
+    }
+
+    /// Assert the proxy closed the session: EOF or reset, never a read timeout
+    /// (which would mean the connection is still open but idle).
+    fn assert_closed(client: &mut UnixStream, what: &str) {
+        match read_message(client) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                ) => {}
+            other => panic!("{what}: expected EOF or reset, got {other:?}"),
+        }
+    }
+
+    fn assert_failure_then_closed(client: &mut UnixStream) {
+        assert_eq!(read_message(client).unwrap(), vec![FAILURE_BYTE]);
+        assert_closed(client, "proxy should close the session");
+    }
+
+    #[test]
+    fn sign_rejects_non_sign_upstream_response_and_closes() {
+        let identities = build_identities_answer(&[(b"hidden-key", b"hidden comment")]);
+        let mut client = run_against_upstream(
+            "sign-type",
+            vec![(Duration::ZERO, identities)],
+            Duration::from_millis(200),
+        );
+
+        write_message(&mut client, &build_sign_request(KEY_BLOB, b"data")).unwrap();
+        assert_failure_then_closed(&mut client);
+    }
+
+    #[test]
+    fn upstream_timeout_closes_session_before_late_reply_is_paired() {
+        // The identities answer arrives after the proxy timed out. If the session
+        // stayed open, the next sign exchange would read it and leak hidden keys.
+        let timeout = Duration::from_millis(100);
+        let late_identities = build_identities_answer(&[(b"hidden-key", b"hidden comment")]);
+        let mut client =
+            run_against_upstream("timeout", vec![(timeout * 3, late_identities)], timeout);
+
+        write_message(&mut client, &[SSH_AGENTC_REQUEST_IDENTITIES]).unwrap();
+        assert_eq!(read_message(&mut client).unwrap(), vec![FAILURE_BYTE]);
+        let _ = write_message(&mut client, &build_sign_request(KEY_BLOB, b"data"));
+        assert_closed(
+            &mut client,
+            "proxy should close the session after an upstream timeout",
+        );
+    }
+
+    #[test]
+    fn sign_forwards_sign_response() {
+        let mut response = vec![SSH_AGENT_SIGN_RESPONSE];
+        write_string(&mut response, b"signature");
+        let mut client = run_against_upstream(
+            "sign-ok",
+            vec![(Duration::ZERO, response.clone())],
+            Duration::from_millis(200),
+        );
+
+        write_message(&mut client, &build_sign_request(KEY_BLOB, b"data")).unwrap();
+        assert_eq!(read_message(&mut client).unwrap(), response);
+    }
 
     #[test]
     fn hard_max_idle_timeout_is_positive_and_bounded() {

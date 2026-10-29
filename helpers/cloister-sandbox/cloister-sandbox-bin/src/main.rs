@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -1558,7 +1558,7 @@ fn handle_broker_launch_request(
         broker_launcher_path(generated_launchers, &request.profile, &request.sandbox)?;
 
     let mut cmd = process::Command::new(&launcher_path);
-    cmd.current_dir(broker::resolve_relative_launch_dir(
+    cmd.current_dir(broker::resolve_contained_launch_dir(
         host_project_root,
         &request.cwd_rel,
     )?);
@@ -1798,14 +1798,16 @@ pub fn delegated_mount_args(
 ) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     for (dest, mount) in &profile.delegated_per_dir_mounts {
-        let source = broker::resolve_delegated_per_dir_source(
-            &mount.path,
-            &session.dir_hash,
-            mount.sub_path.as_deref(),
-        )?;
+        let relative =
+            broker::delegated_per_dir_relative(&session.dir_hash, mount.sub_path.as_deref())?;
+        // The source tree may be writable from the parent sandbox, so open it
+        // without following symlinks and hand bwrap the pinned descriptor. The
+        // descriptor must stay open until bwrap is spawned; this process exits
+        // after the sandbox does, so it is intentionally kept for its lifetime.
+        let source_fd = runtime::open_dir_fd_beneath(&mount.path, &relative)?.into_raw_fd();
         let dest_path = format!("{project_root}/{dest}");
         args.extend(bwrap::delegated_per_dir_args(
-            &source, &dest_path, mount.mode,
+            source_fd, &dest_path, mount.mode,
         ));
     }
     Ok(args)
@@ -3226,11 +3228,51 @@ mod tests {
         .expect("valid config")
     }
 
+    fn fixture_dir_hash() -> String {
+        runtime::compute_dir_hash("/workspace/project")
+    }
+
+    /// Real on-disk sources for the fixture's delegated mounts, which are
+    /// opened as pinned descriptors.
+    fn delegated_fixture_root() -> String {
+        create_delegated_fixture_dirs(&fixture_dir_hash())
+    }
+
+    fn create_delegated_fixture_dirs(hash: &str) -> String {
+        let root =
+            std::env::temp_dir().join(format!("cloister-delegated-fixture-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("worktrees/dev").join(hash)).unwrap();
+        std::fs::create_dir_all(
+            root.join("ephemeral/dev")
+                .join(hash)
+                .join(".cache/pre-commit"),
+        )
+        .unwrap();
+        root.to_str().unwrap().to_string()
+    }
+
+    /// Replace descriptor numbers after `--bind-fd`/`--ro-bind-fd` with `<fd>`.
+    fn normalize_fd_args(args: Vec<String>) -> Vec<String> {
+        let mut out = Vec::with_capacity(args.len());
+        let mut after_fd_flag = false;
+        for arg in args {
+            if after_fd_flag {
+                arg.parse::<RawFd>().expect("fd argument");
+                out.push("<fd>".to_string());
+                after_fd_flag = false;
+                continue;
+            }
+            after_fd_flag = arg == "--bind-fd" || arg == "--ro-bind-fd";
+            out.push(arg);
+        }
+        out
+    }
+
     fn broker_session_fixture() -> broker::BrokerSession {
         broker::BrokerSession {
             token: "token-1".to_string(),
             project_root: "/workspace/project".to_string(),
-            dir_hash: "abc123def456".to_string(),
+            dir_hash: fixture_dir_hash(),
             profiles: BTreeMap::from([
                 (
                     "overlay".to_string(),
@@ -3242,7 +3284,7 @@ mod tests {
                                 "worktrees".to_string(),
                                 DelegatedPerDirMount {
                                     mode: DelegatedAccessMode::Rw,
-                                    path: "/local/worktrees/dev".to_string(),
+                                    path: format!("{}/worktrees/dev", delegated_fixture_root()),
                                     sub_path: None,
                                 },
                             ),
@@ -3250,7 +3292,7 @@ mod tests {
                                 ".cache/pre-commit".to_string(),
                                 DelegatedPerDirMount {
                                     mode: DelegatedAccessMode::Ro,
-                                    path: "/local/ephemeral/dev".to_string(),
+                                    path: format!("{}/ephemeral/dev", delegated_fixture_root()),
                                     sub_path: Some(".cache/pre-commit".to_string()),
                                 },
                             ),
@@ -3370,16 +3412,61 @@ mod tests {
         let profile = lookup_child_profile(&session, "overlay").unwrap();
 
         assert_eq!(
-            delegated_mount_args(&session, profile, &session.project_root).unwrap(),
+            normalize_fd_args(
+                delegated_mount_args(&session, profile, &session.project_root).unwrap()
+            ),
             vec![
-                "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                "--ro-bind-fd",
+                "<fd>",
                 "/workspace/project/.cache/pre-commit",
-                "--bind",
-                "/local/worktrees/dev/abc123def456",
+                "--bind-fd",
+                "<fd>",
                 "/workspace/project/worktrees",
             ]
         );
+    }
+
+    #[test]
+    fn broker_delegated_mount_args_pin_the_resolved_source_directory() {
+        let session = broker_session_fixture();
+        let profile = lookup_child_profile(&session, "overlay").unwrap();
+        let args = delegated_mount_args(&session, profile, &session.project_root).unwrap();
+
+        let fd = args[args.iter().position(|a| a == "--bind-fd").unwrap() + 1]
+            .parse::<RawFd>()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap(),
+            std::path::Path::new(&delegated_fixture_root())
+                .join("worktrees/dev")
+                .join(fixture_dir_hash())
+        );
+    }
+
+    #[test]
+    fn broker_delegated_mount_args_reject_symlinked_source() {
+        let base = temp_test_dir("delegated-symlink-source");
+        let outside = temp_test_dir("delegated-symlink-outside");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut session = broker_session_fixture();
+        std::os::unix::fs::symlink(&outside, base.join(&session.dir_hash)).unwrap();
+        let profile = session.profiles.get_mut("overlay").unwrap();
+        profile
+            .delegated_per_dir_mounts
+            .retain(|dest, _| dest == "worktrees");
+        profile
+            .delegated_per_dir_mounts
+            .get_mut("worktrees")
+            .unwrap()
+            .path = base.to_str().unwrap().to_string();
+        let profile = lookup_child_profile(&session, "overlay").unwrap();
+
+        let err = delegated_mount_args(&session, profile, &session.project_root).unwrap_err();
+        assert!(err.contains("refusing to traverse symlink"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -4184,17 +4271,17 @@ mod tests {
         .unwrap()
         .expect("child broker args");
         assert_eq!(
-            args,
+            normalize_fd_args(args),
             s(&[
                 "--overlay-src",
                 "/workspace/project",
                 "--tmp-overlay",
                 "/workspace/project",
-                "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                "--ro-bind-fd",
+                "<fd>",
                 "/workspace/project/.cache/pre-commit",
-                "--bind",
-                "/local/worktrees/dev/abc123def456",
+                "--bind-fd",
+                "<fd>",
                 "/workspace/project/worktrees",
             ])
         );
@@ -4312,6 +4399,7 @@ mod tests {
         let mut session = broker_session_fixture();
         session.project_root = "/home/ubuntu/src/project".to_string();
         session.dir_hash = runtime::compute_dir_hash("/home/alice/src/project");
+        create_delegated_fixture_dirs(&session.dir_hash);
         let trusted_record = temp_test_dir("child-broker-mixed-view").join("session.json");
         std::fs::create_dir_all(trusted_record.parent().unwrap()).unwrap();
         std::fs::write(&trusted_record, serde_json::to_vec(&session).unwrap()).unwrap();
@@ -4421,6 +4509,7 @@ mod tests {
         let mut session = broker_session_fixture();
         session.project_root = "/home/ubuntu/src/project".to_string();
         session.dir_hash = runtime::compute_dir_hash("/home/alice/src/project");
+        create_delegated_fixture_dirs(&session.dir_hash);
         let trusted_record = temp_test_dir("child-broker-hash-mismatch").join("session.json");
         std::fs::create_dir_all(trusted_record.parent().unwrap()).unwrap();
         std::fs::write(&trusted_record, serde_json::to_vec(&session).unwrap()).unwrap();
@@ -4474,6 +4563,7 @@ mod tests {
         let mut session = broker_session_fixture();
         session.project_root = "/home/ubuntu/src/project".to_string();
         session.dir_hash = runtime::compute_dir_hash("/home/alice/src/project");
+        create_delegated_fixture_dirs(&session.dir_hash);
         let trusted_record =
             temp_test_dir("child-broker-capability-path-match").join("session.json");
         std::fs::create_dir_all(trusted_record.parent().unwrap()).unwrap();
@@ -4593,27 +4683,29 @@ mod tests {
         std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000-child");
 
         assert_eq!(
-            child_broker_args_with_store_dir(
-                "worker",
-                None,
-                "/workspace/project",
-                "/workspace/project",
-                "/run/user/1000-child",
-                Some(trusted_record.as_path()),
-                Some("/workspace/project"),
-            )
-            .unwrap()
-            .unwrap(),
+            normalize_fd_args(
+                child_broker_args_with_store_dir(
+                    "worker",
+                    None,
+                    "/workspace/project",
+                    "/workspace/project",
+                    "/run/user/1000-child",
+                    Some(trusted_record.as_path()),
+                    Some("/workspace/project"),
+                )
+                .unwrap()
+                .unwrap()
+            ),
             vec![
                 "--overlay-src",
                 "/workspace/project",
                 "--tmp-overlay",
                 "/workspace/project",
-                "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                "--ro-bind-fd",
+                "<fd>",
                 "/workspace/project/.cache/pre-commit",
-                "--bind",
-                "/local/worktrees/dev/abc123def456",
+                "--bind-fd",
+                "<fd>",
                 "/workspace/project/worktrees",
             ]
         );

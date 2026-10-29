@@ -44,15 +44,23 @@ pub fn resolve_delegated_per_dir_source(
     dir_hash: &str,
     sub_path: Option<&str>,
 ) -> Result<String, String> {
-    let mut resolved = PathBuf::from(base_path);
-    resolved.push(normalize_safe_path_segment("dir_hash", dir_hash)?);
+    let resolved = PathBuf::from(base_path).join(delegated_per_dir_relative(dir_hash, sub_path)?);
+    Ok(resolved.to_string_lossy().to_string())
+}
+
+/// The traversal-free `<dir_hash>[/<sub_path>]` path of a delegated per-dir
+/// source, relative to its configured base.
+pub fn delegated_per_dir_relative(
+    dir_hash: &str,
+    sub_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let mut relative = normalize_safe_path_segment("dir_hash", dir_hash)?;
 
     if let Some(sub_path) = sub_path.filter(|sub_path| !sub_path.is_empty()) {
-        let relative_sub_path = normalize_relative_sub_path(sub_path)?;
-        resolved.push(relative_sub_path);
+        relative.push(normalize_relative_sub_path(sub_path)?);
     }
 
-    Ok(resolved.to_string_lossy().to_string())
+    Ok(relative)
 }
 
 pub fn validate_project_binding(session: &BrokerSession, project_root: &str) -> Result<(), String> {
@@ -83,14 +91,17 @@ pub fn validate_project_identity(
         return Err("broker project identity requires a non-empty dir hash".to_string());
     }
 
-    let session_root = normalize_absolute_path(session_project_root)?;
+    // The session root is the child-visible alias (remapped under anonymization)
+    // and may name an unrelated host directory, so host-side authorization relies
+    // solely on the hash of the canonical host project root.
+    normalize_absolute_path(session_project_root)?;
     let requested_root = normalize_absolute_path(requested_project_root)?;
     let requested_dir_hash =
         runtime::compute_dir_hash(requested_root.to_str().ok_or_else(|| {
             format!("project root must be valid UTF-8: {requested_project_root}")
         })?);
 
-    if session_root == requested_root || requested_dir_hash == dir_hash {
+    if requested_dir_hash == dir_hash {
         Ok(())
     } else {
         Err(format!(
@@ -131,6 +142,24 @@ pub fn resolve_relative_launch_dir(project_root: &str, cwd_rel: &str) -> Result<
         return Ok(project_root);
     }
     Ok(project_root.join(normalize_relative_sub_path(cwd_rel)?))
+}
+
+/// Resolve `cwd_rel` beneath `project_root` and verify that the canonical result,
+/// after following any symlinks, still lies inside the canonical project root.
+pub fn resolve_contained_launch_dir(project_root: &str, cwd_rel: &str) -> Result<PathBuf, String> {
+    let launch_dir = resolve_relative_launch_dir(project_root, cwd_rel)?;
+    let root_canon = std::fs::canonicalize(project_root)
+        .map_err(|e| format!("resolve project root '{project_root}': {e}"))?;
+    let launch_canon = std::fs::canonicalize(&launch_dir)
+        .map_err(|e| format!("resolve launch dir '{}': {e}", launch_dir.display()))?;
+    if !launch_canon.starts_with(&root_canon) {
+        return Err(format!(
+            "launch dir '{}' resolves outside project root '{}'",
+            launch_dir.display(),
+            root_canon.display()
+        ));
+    }
+    Ok(launch_canon)
 }
 
 fn normalize_relative_sub_path(sub_path: &str) -> Result<PathBuf, String> {
@@ -246,6 +275,58 @@ mod tests {
     fn resolve_relative_launch_dir_rejects_traversal() {
         let err = resolve_relative_launch_dir("/workspace/project", "../escape").unwrap_err();
         assert!(err.contains("delegated per-dir sub_path must be a relative traversal-free path"));
+    }
+
+    #[test]
+    fn validate_project_identity_rejects_alias_root_with_mismatched_hash() {
+        let err = validate_project_identity(
+            "/home/ubuntu/src/project",
+            "/home/ubuntu/src/project",
+            &runtime::compute_dir_hash("/home/alice/src/project"),
+        )
+        .unwrap_err();
+        assert!(err.contains("does not match requested project root"));
+    }
+
+    #[test]
+    fn validate_project_identity_accepts_matching_host_hash() {
+        validate_project_identity(
+            "/home/ubuntu/src/project",
+            "/home/alice/src/project",
+            &runtime::compute_dir_hash("/home/alice/src/project"),
+        )
+        .unwrap();
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let base = std::env::temp_dir();
+        for i in 0..100 {
+            let p = base.join(format!("{}-{}-{}", prefix, std::process::id(), i));
+            if std::fs::create_dir(&p).is_ok() {
+                return std::fs::canonicalize(p).unwrap();
+            }
+        }
+        panic!("failed to create temp dir");
+    }
+
+    #[test]
+    fn resolve_contained_launch_dir_accepts_nested_dir() {
+        let root = temp_dir("broker-launch-ok");
+        std::fs::create_dir_all(root.join("nested/src")).unwrap();
+        let resolved = resolve_contained_launch_dir(root.to_str().unwrap(), "nested/src").unwrap();
+        assert_eq!(resolved, root.join("nested/src"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_contained_launch_dir_rejects_symlink_escape() {
+        let root = temp_dir("broker-launch-escape");
+        let outside = temp_dir("broker-launch-outside");
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let err = resolve_contained_launch_dir(root.to_str().unwrap(), "link").unwrap_err();
+        assert!(err.contains("resolves outside project root"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
