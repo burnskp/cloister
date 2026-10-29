@@ -1558,7 +1558,7 @@ fn handle_broker_launch_request(
         broker_launcher_path(generated_launchers, &request.profile, &request.sandbox)?;
 
     let mut cmd = process::Command::new(&launcher_path);
-    cmd.current_dir(broker::resolve_relative_launch_dir(
+    cmd.current_dir(broker::resolve_contained_launch_dir(
         host_project_root,
         &request.cwd_rel,
     )?);
@@ -3226,11 +3226,15 @@ mod tests {
         .expect("valid config")
     }
 
+    fn fixture_dir_hash() -> String {
+        runtime::compute_dir_hash("/workspace/project")
+    }
+
     fn broker_session_fixture() -> broker::BrokerSession {
         broker::BrokerSession {
             token: "token-1".to_string(),
             project_root: "/workspace/project".to_string(),
-            dir_hash: "abc123def456".to_string(),
+            dir_hash: fixture_dir_hash(),
             profiles: BTreeMap::from([
                 (
                     "overlay".to_string(),
@@ -3373,10 +3377,13 @@ mod tests {
             delegated_mount_args(&session, profile, &session.project_root).unwrap(),
             vec![
                 "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                &format!(
+                    "/local/ephemeral/dev/{}/.cache/pre-commit",
+                    fixture_dir_hash()
+                ),
                 "/workspace/project/.cache/pre-commit",
                 "--bind",
-                "/local/worktrees/dev/abc123def456",
+                &format!("/local/worktrees/dev/{}", fixture_dir_hash()),
                 "/workspace/project/worktrees",
             ]
         );
@@ -4191,10 +4198,13 @@ mod tests {
                 "--tmp-overlay",
                 "/workspace/project",
                 "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                &format!(
+                    "/local/ephemeral/dev/{}/.cache/pre-commit",
+                    fixture_dir_hash()
+                ),
                 "/workspace/project/.cache/pre-commit",
                 "--bind",
-                "/local/worktrees/dev/abc123def456",
+                &format!("/local/worktrees/dev/{}", fixture_dir_hash()),
                 "/workspace/project/worktrees",
             ])
         );
@@ -4610,10 +4620,13 @@ mod tests {
                 "--tmp-overlay",
                 "/workspace/project",
                 "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                &format!(
+                    "/local/ephemeral/dev/{}/.cache/pre-commit",
+                    fixture_dir_hash()
+                ),
                 "/workspace/project/.cache/pre-commit",
                 "--bind",
-                "/local/worktrees/dev/abc123def456",
+                &format!("/local/worktrees/dev/{}", fixture_dir_hash()),
                 "/workspace/project/worktrees",
             ]
         );
