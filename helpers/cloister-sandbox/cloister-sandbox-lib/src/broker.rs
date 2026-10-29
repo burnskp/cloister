@@ -44,15 +44,23 @@ pub fn resolve_delegated_per_dir_source(
     dir_hash: &str,
     sub_path: Option<&str>,
 ) -> Result<String, String> {
-    let mut resolved = PathBuf::from(base_path);
-    resolved.push(normalize_safe_path_segment("dir_hash", dir_hash)?);
+    let resolved = PathBuf::from(base_path).join(delegated_per_dir_relative(dir_hash, sub_path)?);
+    Ok(resolved.to_string_lossy().to_string())
+}
+
+/// The traversal-free `<dir_hash>[/<sub_path>]` path of a delegated per-dir
+/// source, relative to its configured base.
+pub fn delegated_per_dir_relative(
+    dir_hash: &str,
+    sub_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let mut relative = normalize_safe_path_segment("dir_hash", dir_hash)?;
 
     if let Some(sub_path) = sub_path.filter(|sub_path| !sub_path.is_empty()) {
-        let relative_sub_path = normalize_relative_sub_path(sub_path)?;
-        resolved.push(relative_sub_path);
+        relative.push(normalize_relative_sub_path(sub_path)?);
     }
 
-    Ok(resolved.to_string_lossy().to_string())
+    Ok(relative)
 }
 
 pub fn validate_project_binding(session: &BrokerSession, project_root: &str) -> Result<(), String> {
