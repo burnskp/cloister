@@ -319,6 +319,7 @@ For deep details, use these docs in roughly this order:
 - **[D-Bus Proxy](docs/dbus.md)** - per-sandbox D-Bus proxy behavior and policy design
 - **[Image Store](docs/image-store.md)** - immutable `/nix/store` image mode and host-side publishing
 - **[Network Namespaces](docs/network-namespace.md)** - localhost, LAN, isolated, and VPN-routed namespaces
+- **[Services](docs/services.md)** - run daemons such as paseo inside a sandbox as systemd user units
 
 ## Examples
 

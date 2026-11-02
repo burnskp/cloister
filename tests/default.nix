@@ -66,6 +66,15 @@ let
         ;
     };
 
+    "test-cloister-services" = import ./cloister/services.nix {
+      inherit
+        checks
+        hm
+        lib
+        pkgs
+        ;
+    };
+
     "test-cloister-worker-broker" = import ./cloister/worker-broker.nix {
       inherit
         checks
@@ -112,6 +121,10 @@ let
     };
 
     "test-runtime-netns" = import ./runtime/netns.nix {
+      inherit pkgs;
+    };
+
+    "test-runtime-services" = import ./runtime/services.nix {
       inherit pkgs;
     };
   };

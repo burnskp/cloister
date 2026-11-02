@@ -1218,9 +1218,21 @@ let
   # Build all sandboxes
   allSandboxes = lib.mapAttrs mkSandbox cfg.sandboxes;
 
-  imageStoreInfos = builtins.filter (info: info != null) (
-    map (sb: sb.imageStoreInfo) (builtins.attrValues allSandboxes)
-  );
+  services = import ./_services.nix {
+    inherit
+      lib
+      pkgs
+      config
+      mkSandbox
+      cloister-sandbox
+      ;
+  };
+
+  imageStoreInfos =
+    builtins.filter (info: info != null) (
+      map (sb: sb.imageStoreInfo) (builtins.attrValues allSandboxes)
+    )
+    ++ services.imageStoreInfos;
 
 in
 {
@@ -1231,13 +1243,15 @@ in
         message = "cloister: requires Linux (bubblewrap is not available on macOS).";
       }
     ]
-    ++ lib.concatLists (lib.mapAttrsToList (_: sb: sb.assertions) allSandboxes);
+    ++ lib.concatLists (lib.mapAttrsToList (_: sb: sb.assertions) allSandboxes)
+    ++ services.assertions;
 
-    home.packages = lib.mapAttrsToList (_: sb: sb.package) allSandboxes;
+    home.packages = lib.mapAttrsToList (_: sb: sb.package) allSandboxes ++ services.packages;
 
     cloister._internal.imageStoreInfos = imageStoreInfos;
     cloister._internal.sandboxConfigs = lib.mapAttrs (_: sb: sb.sandboxConfig) allSandboxes;
     cloister._internal.sandboxInternals = lib.mapAttrs (_: sb: sb.internal) allSandboxes;
+    cloister._internal.serviceInternals = services.internals;
 
     systemd =
       let
@@ -1245,7 +1259,7 @@ in
       in
       {
         user = {
-          services = dbusServices;
+          services = dbusServices // services.units;
           timers = { };
           sockets = { };
           tmpfiles.rules =

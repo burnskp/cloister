@@ -60,6 +60,12 @@ let
     imports = [ ../../examples/worker-broker.nix ];
   };
 
+  paseoService = hm {
+    cloister.enable = true;
+    imports = [ ../../examples/paseo-service.nix ];
+  };
+  paseoUnit = paseoService.config.systemd.user.services.cloister-service-paseo;
+
   shellCustomRcConfig = shellCustomRc.config.cloister._internal.sandboxConfigs.dev;
   shellCustomRcStaticArgs = builtins.toJSON shellCustomRcConfig.static_bwrap_args;
   packageNames = packages: map lib.getName packages;
@@ -167,5 +173,11 @@ checks.mkCheck "test-cloister-examples" [
   )
   (checks.expectEq "worker broker example hardens rw worker" "hardened"
     workerBroker.config.cloister.sandboxes.worker-rw.preset
+  )
+  (checks.expectContains "paseo example runs under service launcher" "cloister-service-paseo"
+    paseoUnit.Service.ExecStart
+  )
+  (checks.expectContains "paseo example runs daemon in foreground" "-c paseo daemon run"
+    paseoService.config.cloister._internal.serviceInternals.paseo.launcherText
   )
 ]
