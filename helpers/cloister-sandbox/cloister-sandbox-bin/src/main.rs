@@ -36,7 +36,16 @@ static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static GRACEFUL_PID: AtomicI32 = AtomicI32::new(0);
 
 /// Host PID that should receive forced teardown signals (SIGKILL).
+///
+/// Always a direct PID: the sandbox's PID-namespace init when it was found
+/// (killing it tears down the whole namespace), otherwise the outer bubblewrap
+/// process (whose death tears down the sandbox via `--die-with-parent`).
 static FORCE_PID: AtomicI32 = AtomicI32::new(0);
+
+/// Termination signal (SIGTERM/SIGHUP) received before a child existed to
+/// forward it to. 0 means none. Checked before spawning so a stop request that
+/// arrives during setup is honored instead of silently dropped.
+static PENDING_TERMINATION: AtomicI32 = AtomicI32::new(0);
 
 /// Number of rapid consecutive SIGINTs (resets after [`SIGINT_ESCALATION_WINDOW_SECS`]).
 static SIGINT_COUNT: AtomicI32 = AtomicI32::new(0);
@@ -116,8 +125,12 @@ fn graceful_signal_target(pid: libc::pid_t) -> libc::pid_t {
     pid
 }
 
-fn force_signal_target(pid: libc::pid_t, interactive: bool) -> libc::pid_t {
-    if interactive { pid } else { -pid }
+/// Record a termination request that arrived before any child existed.
+/// Only the first request is kept. Async-signal-safe.
+fn record_pending_termination(sig: libc::c_int) {
+    if sig == libc::SIGTERM || sig == libc::SIGHUP {
+        let _ = PENDING_TERMINATION.compare_exchange(0, sig, Ordering::AcqRel, Ordering::Acquire);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,40 +296,71 @@ fn read_proc_nspid(pid: u32) -> Result<Vec<u32>, String> {
     parse_proc_nspid(&content).map_err(|e| format!("parse {path}: {e}"))
 }
 
-fn sandbox_signal_pid(root_pid: u32) -> Result<u32, String> {
-    sandbox_signal_pid_with_reader(root_pid, read_proc_children, read_proc_nspid)
-        .map(|(pid, _)| pid)
-}
-
-fn find_signal_pids(root_pid: u32, interactive: bool) -> Result<(u32, u32), String> {
+/// Resolve `(graceful, force)` signal targets for a freshly spawned child.
+///
+/// Interactive shells are signalled directly through the outer process. For
+/// non-interactive launches, `probe` returns `(namespace PID 2, namespace
+/// init)`, or the init twice while the main process has not started yet; the
+/// loop keeps polling until the main process appears, the child exits, or the
+/// attempts run out. Whatever is known at that point is used:
+///
+/// - main process found: graceful = main process, force = namespace init
+/// - only the init found: graceful = force = init (SIGTERM is ignored by the
+///   init, so stop relies on the SIGKILL escalation)
+/// - nothing found: graceful = force = the outer process; killing it tears down
+///   the sandbox through `--die-with-parent`
+fn wait_for_signal_pids_with<P, E>(
+    root_pid: u32,
+    interactive: bool,
+    attempts: u64,
+    poll: Duration,
+    mut probe: P,
+    mut child_exited: E,
+) -> (u32, u32)
+where
+    P: FnMut(u32) -> Result<(u32, u32), String>,
+    E: FnMut() -> bool,
+{
     if interactive {
-        return Ok((root_pid, root_pid));
+        return (root_pid, root_pid);
     }
 
-    sandbox_signal_pid(root_pid).map(|graceful_pid| (graceful_pid, root_pid))
-}
-
-fn wait_for_signal_pids(root_pid: u32, interactive: bool) -> Result<(u32, u32), String> {
-    if interactive {
-        return Ok((root_pid, root_pid));
-    }
-
-    let poll = Duration::from_millis(FLATPAK_CHILD_PID_POLL_MS);
-    let attempts = FLATPAK_CHILD_PID_TIMEOUT_MS / FLATPAK_CHILD_PID_POLL_MS;
-    let mut last_err = None;
-
-    for _ in 0..attempts {
-        match find_signal_pids(root_pid, interactive) {
-            Ok(pids) => return Ok(pids),
-            Err(err) => last_err = Some(err),
+    let mut partial = None;
+    for attempt in 0..attempts {
+        match probe(root_pid) {
+            Ok((graceful, init)) if graceful != init => return (graceful, init),
+            Ok(pids) => partial = Some(pids),
+            Err(_) => {}
         }
-        thread::sleep(poll);
+        if child_exited() {
+            break;
+        }
+        if attempt + 1 < attempts {
+            thread::sleep(poll);
+        }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        format!("timed out waiting for signal target for bubblewrap pid {root_pid}")
-    }))
+    partial.unwrap_or((root_pid, root_pid))
 }
+
+fn wait_for_signal_pids(child: &mut process::Child, interactive: bool) -> (u32, u32) {
+    let root_pid = child.id();
+    wait_for_signal_pids_with(
+        root_pid,
+        interactive,
+        SIGNAL_TARGET_TIMEOUT_MS / SIGNAL_TARGET_POLL_MS,
+        Duration::from_millis(SIGNAL_TARGET_POLL_MS),
+        |pid| sandbox_signal_pid_with_reader(pid, read_proc_children, read_proc_nspid),
+        // try_wait caches the exit status, so the later wait() still sees it.
+        || !matches!(child.try_wait(), Ok(None)),
+    )
+}
+
+/// Upper bound for discovering signal targets. Polling stops as soon as the
+/// sandbox main process appears or the child exits, so this only matters on a
+/// heavily loaded host.
+const SIGNAL_TARGET_TIMEOUT_MS: u64 = 5_000;
+const SIGNAL_TARGET_POLL_MS: u64 = 10;
 
 const FLATPAK_CHILD_PID_TIMEOUT_MS: u64 = 500;
 const FLATPAK_CHILD_PID_POLL_MS: u64 = 10;
@@ -683,10 +727,12 @@ fn monotonic_seconds() -> i64 {
 /// Only uses async-signal-safe operations (atomics, `kill`, `write`, `clock_gettime`, `alarm`).
 extern "C" fn forward_signal(sig: libc::c_int) {
     let graceful_pid = GRACEFUL_PID.load(Ordering::Acquire);
-    let force_pid = FORCE_PID
-        .load(Ordering::Acquire)
-        .max(CHILD_PID.load(Ordering::Acquire));
+    let force_pid = match FORCE_PID.load(Ordering::Acquire) {
+        pid if pid > 0 => pid,
+        _ => CHILD_PID.load(Ordering::Acquire),
+    };
     if graceful_pid <= 0 && force_pid <= 0 {
+        record_pending_termination(sig);
         return;
     }
 
@@ -696,11 +742,7 @@ extern "C" fn forward_signal(sig: libc::c_int) {
     } else {
         0
     };
-    let force_target = if force_pid > 0 {
-        force_signal_target(force_pid, interactive)
-    } else {
-        0
-    };
+    let force_target = force_pid.max(0);
 
     match sig {
         libc::SIGINT => {
@@ -820,6 +862,15 @@ fn spawn_and_wait(
         });
     }
 
+    // A stop request that arrived during setup: honor it instead of starting
+    // a sandbox nobody can stop. Checked with the signals blocked, so a
+    // request cannot slip in between this check and storing the targets.
+    let pending = PENDING_TERMINATION.load(Ordering::Acquire);
+    if pending != 0 {
+        set_signal_mask(libc::SIG_SETMASK, &old_set, None);
+        return Ok(ExitStatus::from_raw(pending));
+    }
+
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -831,8 +882,7 @@ fn spawn_and_wait(
         }
     };
     CHILD_PID.store(child.id() as i32, Ordering::Release);
-    let (graceful_pid, force_pid) =
-        wait_for_signal_pids(child.id(), interactive).unwrap_or((child.id(), child.id()));
+    let (graceful_pid, force_pid) = wait_for_signal_pids(&mut child, interactive);
     GRACEFUL_PID.store(graceful_pid as i32, Ordering::Release);
     FORCE_PID.store(force_pid as i32, Ordering::Release);
 
@@ -5626,6 +5676,7 @@ mod tests {
     /// Reset signal-handler statics so tests don't interfere with each other.
     fn reset_signal_state() {
         clear_signal_targets();
+        PENDING_TERMINATION.store(0, Ordering::Release);
         SIGINT_COUNT.store(0, Ordering::Release);
         LAST_SIGINT_SEC.store(0, Ordering::Release);
         INTERACTIVE_MODE.store(false, Ordering::Release);
@@ -5779,14 +5830,123 @@ mod tests {
         reset_signal_state();
     }
 
-    #[test]
-    fn signal_target_uses_process_group_for_noninteractive_children() {
-        assert_eq!(force_signal_target(1234, false), -1234);
+    fn no_sleep() -> Duration {
+        Duration::from_millis(0)
     }
 
     #[test]
-    fn signal_target_uses_direct_pid_for_interactive_children() {
-        assert_eq!(force_signal_target(1234, true), 1234);
+    fn signal_targets_use_outer_process_for_interactive_children() {
+        let targets = wait_for_signal_pids_with(
+            100,
+            true,
+            5,
+            no_sleep(),
+            |_| panic!("interactive launches must not probe"),
+            || false,
+        );
+        assert_eq!(targets, (100, 100));
+    }
+
+    #[test]
+    fn signal_targets_wait_for_sandbox_main_process() {
+        let mut calls = 0;
+        let targets = wait_for_signal_pids_with(
+            100,
+            false,
+            10,
+            no_sleep(),
+            |_| {
+                calls += 1;
+                match calls {
+                    1 => Err("no children yet".to_string()),
+                    2 => Ok((300, 300)),
+                    _ => Ok((301, 300)),
+                }
+            },
+            || false,
+        );
+        assert_eq!(targets, (301, 300));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn signal_targets_fall_back_to_namespace_init_when_main_process_never_appears() {
+        let targets =
+            wait_for_signal_pids_with(100, false, 3, no_sleep(), |_| Ok((300, 300)), || false);
+        assert_eq!(targets, (300, 300));
+    }
+
+    #[test]
+    fn signal_targets_fall_back_to_outer_process_when_nothing_is_found() {
+        let targets = wait_for_signal_pids_with(
+            100,
+            false,
+            3,
+            no_sleep(),
+            |_| Err("not found".to_string()),
+            || false,
+        );
+        assert_eq!(targets, (100, 100));
+    }
+
+    #[test]
+    fn signal_targets_stop_polling_when_child_exits() {
+        let mut calls = 0;
+        let targets = wait_for_signal_pids_with(
+            100,
+            false,
+            1_000,
+            no_sleep(),
+            |_| {
+                calls += 1;
+                Err("gone".to_string())
+            },
+            || true,
+        );
+        assert_eq!(targets, (100, 100));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn termination_before_child_is_recorded_once() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        forward_signal(libc::SIGINT);
+        forward_signal(libc::SIGALRM);
+        assert_eq!(PENDING_TERMINATION.load(Ordering::Acquire), 0);
+        forward_signal(libc::SIGHUP);
+        forward_signal(libc::SIGTERM);
+        assert_eq!(PENDING_TERMINATION.load(Ordering::Acquire), libc::SIGHUP);
+        reset_signal_state();
+    }
+
+    #[test]
+    fn spawn_and_wait_skips_spawn_after_pending_termination() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        forward_signal(libc::SIGTERM);
+
+        let marker = temp_test_dir("pending-termination").join("spawned");
+        let mut cmd = process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!("touch '{}'", marker.display()));
+        let status = spawn_and_wait(&mut cmd, false, None).unwrap();
+
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        assert!(!marker.exists(), "child must not be spawned");
+        reset_signal_state();
+    }
+
+    #[test]
+    fn sigalrm_force_kills_child_directly() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        let mut child = process::Command::new("sleep").arg("30").spawn().unwrap();
+        GRACEFUL_PID.store(child.id() as i32, Ordering::Release);
+        FORCE_PID.store(child.id() as i32, Ordering::Release);
+        forward_signal(libc::SIGALRM);
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        reset_signal_state();
     }
 
     #[test]
