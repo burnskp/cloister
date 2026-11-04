@@ -123,7 +123,7 @@ let
           if workerBrokerLauncherPackage != null then toString workerBrokerLauncherPackage else ""
         }}"
 
-        exec ${cloister-sandbox}/bin/cloister-sandbox --config ${configJsonPath} -- \
+        exec ${cloister-sandbox}/bin/cloister-sandbox --config ${configJsonPath} --service-name ${lib.escapeShellArg name} -- \
           -c ${lib.escapeShellArgs svc.command} "$@"
       '';
 

@@ -1246,7 +1246,14 @@ in
     ++ lib.concatLists (lib.mapAttrsToList (_: sb: sb.assertions) allSandboxes)
     ++ services.assertions;
 
-    home.packages = lib.mapAttrsToList (_: sb: sb.package) allSandboxes ++ services.packages;
+    home.packages =
+      lib.mapAttrsToList (_: sb: sb.package) allSandboxes
+      ++ services.packages
+      ++ [
+        (pkgs.writeShellScriptBin "cloister-attach" ''
+          exec ${cloister-sandbox}/bin/cloister-sandbox attach "$@"
+        '')
+      ];
 
     cloister._internal.imageStoreInfos = imageStoreInfos;
     cloister._internal.sandboxConfigs = lib.mapAttrs (_: sb: sb.sandboxConfig) allSandboxes;

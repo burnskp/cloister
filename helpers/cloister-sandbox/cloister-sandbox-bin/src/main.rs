@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+mod attach_mode;
+
+use cloister_sandbox_lib::attach as instance_registry;
 use cloister_sandbox_lib::broker;
 use cloister_sandbox_lib::broker_store;
 use cloister_sandbox_lib::bwrap;
@@ -145,6 +148,7 @@ struct CliArgs {
     after_netns: bool,
     broker_launch: Option<BrokerLaunchSelector>,
     broker_trusted_record_path: Option<String>,
+    service_name: Option<String>,
     sandbox_args: Vec<String>,
 }
 
@@ -830,10 +834,145 @@ fn install_signal_handlers() {
 ///
 /// Blocks SIGTERM/SIGINT/SIGHUP/SIGALRM around the spawn→store window to
 /// prevent signals from being dropped when CHILD_PID is still 0.
+/// What the launcher knows about an instance before its processes exist.
+struct InstanceDraft {
+    registry: PathBuf,
+    record: instance_registry::InstanceRecord,
+}
+
+/// Publishes the running instance for `cloister-attach`, and withdraws it on exit.
+struct InstanceRegistration {
+    stop: Arc<AtomicBool>,
+    worker: thread::JoinHandle<Option<PathBuf>>,
+}
+
+impl InstanceRegistration {
+    /// Discovery runs on its own thread because interactive launches never probe
+    /// for sandbox PIDs, and the main thread is about to block in `wait`.
+    fn start(root_pid: u32, draft: InstanceDraft) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || publish_instance(root_pid, draft, &stop))
+        };
+        Self { stop, worker }
+    }
+
+    fn finish(self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(Some(path)) = self.worker.join() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn publish_instance(root_pid: u32, draft: InstanceDraft, stop: &AtomicBool) -> Option<PathBuf> {
+    let bwrap_exe = std::fs::read_link(format!("/proc/{root_pid}/exe")).ok()?;
+    for _ in 0..(SIGNAL_TARGET_TIMEOUT_MS / SIGNAL_TARGET_POLL_MS) {
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
+        if let Some(record) = locate_instance(root_pid, &bwrap_exe, &draft.record) {
+            return match instance_registry::write_record(&draft.registry, &record) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    eprintln!(
+                        "cloister-sandbox[{}]: register instance: {e}",
+                        record.sandbox
+                    );
+                    None
+                }
+            };
+        }
+        thread::sleep(Duration::from_millis(SIGNAL_TARGET_POLL_MS));
+    }
+    None
+}
+
+/// Fill in the sandbox's PIDs once PID 2 has exec'd. Until then it is a bwrap
+/// fork whose environ is still the launcher's unsanitized host environment.
+fn locate_instance(
+    root_pid: u32,
+    bwrap_exe: &Path,
+    draft: &instance_registry::InstanceRecord,
+) -> Option<instance_registry::InstanceRecord> {
+    let (main_pid, sandbox_pid1) =
+        sandbox_signal_pid_with_reader(root_pid, read_proc_children, read_proc_nspid).ok()?;
+    if main_pid == sandbox_pid1 {
+        return None;
+    }
+    let main_exe = std::fs::read_link(format!("/proc/{main_pid}/exe")).ok()?;
+    if main_exe == bwrap_exe {
+        return None;
+    }
+    Some(instance_registry::InstanceRecord {
+        sandbox_pid1,
+        sandbox_pid1_start_time: instance_registry::read_start_time(sandbox_pid1)?,
+        main_pid,
+        main_pid_start_time: instance_registry::read_start_time(main_pid)?,
+        ..draft.clone()
+    })
+}
+
+/// Build this launch's registry entry, or `None` when it cannot be listed safely.
+///
+/// A sandbox that can see the registry could forge records for other instances.
+/// Binding the whole runtime directory already hands it every host socket, so
+/// such a sandbox is left unattachable rather than refused outright.
+fn instance_draft(
+    config: &SandboxConfig,
+    host_xdg_runtime_dir: &str,
+    bwrap_args: &[String],
+    host_project: &str,
+    start_dir: &str,
+    service_name: Option<&str>,
+) -> Option<InstanceDraft> {
+    if host_xdg_runtime_dir.is_empty() {
+        return None;
+    }
+    let registry = instance_registry::registry_dir(host_xdg_runtime_dir);
+    if instance_registry::bwrap_args_expose_registry(bwrap_args, &registry) {
+        eprintln!(
+            "{}: a bind exposes {}; this instance will not be available to cloister-attach",
+            err_prefix(&config.name),
+            registry.display()
+        );
+        return None;
+    }
+    let mut shell_argv = vec![config.shell_bin.clone()];
+    shell_argv.extend_from_slice(&config.shell_interactive_args);
+    let launched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(InstanceDraft {
+        registry,
+        record: instance_registry::InstanceRecord {
+            sandbox_pid1: 0,
+            sandbox_pid1_start_time: 0,
+            main_pid: 0,
+            main_pid_start_time: 0,
+            sandbox: config.name.clone(),
+            service: service_name.map(str::to_string),
+            host_project: (!host_project.is_empty()).then(|| host_project.to_string()),
+            start_dir: start_dir.to_string(),
+            launched_at,
+            shell_argv,
+            seccomp_filter_path: config
+                .seccomp_filter_path
+                .clone()
+                .filter(|_| config.seccomp_enable),
+            network_namespace: config.network_namespace.clone(),
+            netns_helper_path: config.netns_helper_path.clone(),
+        },
+    })
+}
+
 fn spawn_and_wait(
     cmd: &mut process::Command,
     interactive: bool,
     flatpak_state: Option<&FlatpakPortalState>,
+    instance: Option<InstanceDraft>,
 ) -> io::Result<ExitStatus> {
     // Reset escalation state for new child
     SIGINT_COUNT.store(0, Ordering::Release);
@@ -882,6 +1021,9 @@ fn spawn_and_wait(
         }
     };
     CHILD_PID.store(child.id() as i32, Ordering::Release);
+    // Started with the forwarded signals still blocked, so handlers stay on the
+    // main thread.
+    let registration = instance.map(|draft| InstanceRegistration::start(child.id(), draft));
     let (graceful_pid, force_pid) = wait_for_signal_pids(&mut child, interactive);
     GRACEFUL_PID.store(graceful_pid as i32, Ordering::Release);
     FORCE_PID.store(force_pid as i32, Ordering::Release);
@@ -895,6 +1037,9 @@ fn spawn_and_wait(
         if let Err(err) = setup_result {
             let _ = child.kill();
             let _ = child.wait();
+            if let Some(registration) = registration {
+                registration.finish();
+            }
             clear_signal_targets();
             unsafe { libc::alarm(0) };
             set_signal_mask(libc::SIG_SETMASK, &old_set, None);
@@ -906,6 +1051,9 @@ fn spawn_and_wait(
     set_signal_mask(libc::SIG_SETMASK, &old_set, None);
 
     let status = child.wait();
+    if let Some(registration) = registration {
+        registration.finish();
+    }
     // Block the forwarded signals while clearing stale targets so a late
     // delivery cannot hit a recycled PID or process group.
     clear_signal_targets_blocking_signals();
@@ -2044,6 +2192,11 @@ fn filter_child_overlay_project_bind(
 fn run() -> i32 {
     // --- 1. Parse CLI args ---
     let args: Vec<String> = std::env::args().collect();
+    // Launchers always pass --config first, so sandbox arguments can never land
+    // here: `cl-dev attach` still runs `attach` inside the sandbox.
+    if args.get(1).map(String::as_str) == Some("attach") {
+        return attach_mode::run(&args[2..]);
+    }
     let cli = parse_cli_args(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
         process::exit(2);
@@ -2148,9 +2301,12 @@ fn run() -> i32 {
             if let Some(trusted_record_path) = cli.broker_trusted_record_path.as_deref() {
                 cmd.args(["--broker-trusted-record", trusted_record_path]);
             }
+            if let Some(service_name) = cli.service_name.as_deref() {
+                cmd.args(["--service-name", service_name]);
+            }
             cmd.args(&cli.sandbox_args);
 
-            let status = spawn_and_wait(&mut cmd, false, None).unwrap_or_else(|e| {
+            let status = spawn_and_wait(&mut cmd, false, None, None).unwrap_or_else(|e| {
                 eprintln!("{prefix}: exec netns helper: {e}");
                 process::exit(127);
             });
@@ -2884,6 +3040,26 @@ fn run() -> i32 {
     // --- 11. Spawn bwrap ---
     INTERACTIVE_MODE.store(is_interactive, Ordering::Release);
 
+    let instance = {
+        let mut bind_args = config.static_bwrap_args.clone();
+        bind_args.extend(extra_args.iter().cloned());
+        for bind in &config_dynamic_binds {
+            bind_args.extend([
+                "--bind".to_string(),
+                vars::expand_vars(&bind.src, &runtime_vars),
+                "/".to_string(),
+            ]);
+        }
+        instance_draft(
+            &config,
+            &host_xdg_runtime_dir,
+            &bind_args,
+            &sandbox_dir,
+            &effective_start_dir,
+            cli.service_name.as_deref(),
+        )
+    };
+
     let config_for_bwrap = SandboxConfig {
         dynamic_binds: config_dynamic_binds,
         ..config
@@ -2916,7 +3092,12 @@ fn run() -> i32 {
         }
     };
 
-    let status = match spawn_and_wait(&mut cmd, is_interactive, flatpak_portal_state.as_ref()) {
+    let status = match spawn_and_wait(
+        &mut cmd,
+        is_interactive,
+        flatpak_portal_state.as_ref(),
+        instance,
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{prefix}: exec bwrap: {e}");
@@ -3133,6 +3314,7 @@ fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
         after_netns: false,
         broker_launch: None,
         broker_trusted_record_path: None,
+        service_name: None,
         sandbox_args: Vec::new(),
     };
     let mut i = 1;
@@ -3182,6 +3364,15 @@ fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
                     );
                 }
                 set_broker_trusted_record_path(&mut parsed, args[i].clone())?;
+            }
+            "--service-name" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("cloister-sandbox: --service-name requires a name".to_string());
+                }
+                if parsed.service_name.replace(args[i].clone()).is_some() {
+                    return Err("cloister-sandbox: duplicate --service-name".to_string());
+                }
             }
             "--" => {
                 past_separator = true;
@@ -5273,6 +5464,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_service_name_is_consumed_before_sandbox_args() {
+        let args: Vec<String> = [
+            "prog",
+            "--config",
+            "/c",
+            "--service-name",
+            "paseo",
+            "--",
+            "-c",
+            "x",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let parsed = parse_cli_args(&args).unwrap();
+        assert_eq!(parsed.service_name.as_deref(), Some("paseo"));
+        assert_eq!(parsed.sandbox_args, vec!["-c", "x"]);
+    }
+
+    #[test]
+    fn parse_service_name_after_separator_belongs_to_the_sandbox() {
+        let args: Vec<String> = ["prog", "--config", "/c", "--", "--service-name", "x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let parsed = parse_cli_args(&args).unwrap();
+        assert_eq!(parsed.service_name, None);
+        assert_eq!(parsed.sandbox_args, vec!["--service-name", "x"]);
+    }
+
+    #[test]
     fn parse_after_netns() {
         let args = s(&[
             "cloister-sandbox",
@@ -5929,7 +6151,7 @@ mod tests {
         let marker = temp_test_dir("pending-termination").join("spawned");
         let mut cmd = process::Command::new("/bin/sh");
         cmd.arg("-c").arg(format!("touch '{}'", marker.display()));
-        let status = spawn_and_wait(&mut cmd, false, None).unwrap();
+        let status = spawn_and_wait(&mut cmd, false, None, None).unwrap();
 
         assert_eq!(status.signal(), Some(libc::SIGTERM));
         assert!(!marker.exists(), "child must not be spawned");

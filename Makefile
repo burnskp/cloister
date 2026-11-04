@@ -126,6 +126,9 @@ test-changed:
 			tests/runtime/services.nix) \
 				add_runtime_check test-runtime-services \
 				;; \
+			tests/runtime/attach.nix) \
+				add_runtime_check test-runtime-attach \
+				;; \
 			modules/cloister/_services.nix) \
 				add_check test-cloister-services; \
 				add_runtime_check test-runtime-services \
@@ -210,7 +213,8 @@ test-changed:
 			helpers/cloister-sandbox|helpers/cloister-sandbox/*) \
 				add_helper helpers/cloister-sandbox; \
 				add_check test-cloister-rendered-config; \
-				add_runtime_check test-runtime-sandbox-core \
+				add_runtime_check test-runtime-sandbox-core; \
+				add_runtime_check test-runtime-attach \
 				;; \
 			helpers/*) \
 				helper="$${path#helpers/}"; \

@@ -127,6 +127,10 @@ let
     "test-runtime-services" = import ./runtime/services.nix {
       inherit pkgs;
     };
+
+    "test-runtime-attach" = import ./runtime/attach.nix {
+      inherit pkgs;
+    };
   };
 in
 evalChecks

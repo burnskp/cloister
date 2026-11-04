@@ -320,6 +320,7 @@ For deep details, use these docs in roughly this order:
 - **[Image Store](docs/image-store.md)** - immutable `/nix/store` image mode and host-side publishing
 - **[Network Namespaces](docs/network-namespace.md)** - localhost, LAN, isolated, and VPN-routed namespaces
 - **[Services](docs/services.md)** - run daemons such as paseo inside a sandbox as systemd user units
+- **[Attaching To A Running Sandbox](docs/attach.md)** - open a shell inside a running browser, service, or dev sandbox
 
 ## Examples
 

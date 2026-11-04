@@ -114,3 +114,7 @@ Evaluation fails when:
 - `workingDirectory` is `/`, your home directory, contains `$` or a newline, or is a Nix store path
 - an `env` key is not a valid variable name
 - the derived sandbox fails any normal sandbox assertion (for example unsafe bind paths, duplicate destinations, or env keys that override computed variables). These messages are prefixed with `cloister.services.<name> (derived from sandbox <sandbox>)`.
+
+## Getting A Shell In A Service
+
+Use [`cloister-attach`](attach.md) with the service name to open a shell inside the running service, for example `cloister-attach paseo`.
