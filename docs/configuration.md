@@ -478,6 +478,7 @@ Setting `network.namespace` implies networking for that sandbox even if a preset
 For full details (declarative namespace types, WireGuard and LAN examples, file-based secret options, and all `cloister-netns.*` options), see [Network Namespaces](network-namespace.md).
 For veth-based namespace types (`localhost`, `lan`), addresses are auto-assigned from `cloister-netns.veth.addressPool`.
 For localhost namespaces, Cloister always opens host firewall ports on `veth-<name>` and adds matching accepts in cloister-netns localhost nft `input` rules for `allowedPorts`.
+LAN namespaces do the same for `allowedHostPorts`, which DNATs `host.internal:<port>` to host `127.0.0.1:<port>`.
 If `/etc/netns/<name>/hosts` or `/etc/netns/<name>/resolv.conf` is missing, Cloister falls back to host `/etc/hosts` and `/etc/resolv.conf`. Explicit `network.dns` settings replace resolver selection and disable its fallback.
 
 ### Git configuration
