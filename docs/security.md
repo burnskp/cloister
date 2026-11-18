@@ -89,3 +89,20 @@ The default writable project mount includes project secrets such as `.env` and r
 The shared `scripts/rust-check.sh` audit denies unsoundness warnings. Lockfiles use patched `anyhow >=1.0.103` ([RUSTSEC-2026-0190](https://rustsec.org/advisories/RUSTSEC-2026-0190)) and `event-listener >=5.4.2` ([RUSTSEC-2026-0221](https://rustsec.org/advisories/RUSTSEC-2026-0221)).
 
 Only `helpers/cloister-sandbox` and `helpers/cloister-wayland-validate` temporarily ignore [RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194) and [RUSTSEC-2026-0195](https://rustsec.org/advisories/RUSTSEC-2026-0195). Their `wayrs-client` dependency (also used by the sandbox’s `wayrs-protocols`) uses the `wayrs-scanner` procedural macro → `wayrs-proto-parser` → `quick-xml` dependency chain. It parses bundled protocol XML during compilation, not XML supplied by sandbox clients at runtime. The exceptions cover XML denial-of-service findings in this compile-time dependency only; other workspaces and other advisories still fail validation. Remove both exceptions and update the lockfiles when upstream `wayrs-proto-parser` supports patched `quick-xml >=0.41.0`. Reassess immediately if XML inputs become untrusted or runtime parsing is introduced.
+
+## Attaching To Sandboxes
+
+[`cloister-attach`](attach.md) joins a running sandbox from the host. It adds no listener or helper process inside the sandbox, and nothing inside a sandbox can start an attach.
+
+**Same policy as the target.** The attached process joins the target's namespaces, drops all capabilities, sets `no_new_privs`, and loads the seccomp filter the instance started with. If that filter is gone, attach refuses rather than run with a different one.
+
+**The sandbox is untrusted input.** Attaching is an interaction between your terminal and a sandbox that may be compromised:
+
+- **Terminal:** the sandbox never receives a host terminal descriptor. A host-side relay copies bytes to a new PTY, so `TIOCSTI` and terminal reads inside the sandbox only reach that PTY. The attached process also starts a new session, so `/dev/tty` cannot resolve to your terminal. Escape sequences written by the sandbox do reach your terminal, as they do with an interactive `cl-<name>`.
+- **Environment:** values read from the sandbox are only handed to the process already inside it, never acted on by host-side code. They come from the sandbox's PID 2 after its `exec`, because `bwrap` (PID 1) still holds the launcher's unsanitized host environment.
+- **Descriptors:** other host descriptors are closed before joining. Pipes and files you explicitly connect to stdio are passed through.
+- **Setup window:** while joining, the helper briefly holds capabilities inside the sandbox's user namespace. It is non-dumpable throughout and stays outside the sandbox's PID namespace, so sandbox processes cannot see or trace it.
+
+**The registry is a trust boundary.** Launchers record running instances in `$XDG_RUNTIME_DIR/cloister/instances` (mode `0700`), including the seccomp filter path and shell to use. A sandbox able to write there could choose the policy of a later attach to another sandbox. This directory is not mounted into sandboxes, and attach refuses a registry that is not private to you.
+
+A launcher whose binds would expose the registry warns and does not register that instance. It still runs, because a sandbox with that bind already has every socket in your runtime directory, which is a larger exposure than the registry. Keep sandboxes that bind `$XDG_RUNTIME_DIR` out of your trust boundary. As a last check, attach refuses any target that shares its own user namespace, so a forged record cannot make it run a command on the host.

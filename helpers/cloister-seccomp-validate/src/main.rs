@@ -574,6 +574,30 @@ fn test_ioctl_tiocsti_blocked() -> TestResult {
     TestResult::Allowed
 }
 
+/// Test that prctl(2) with PR_SET_SECUREBITS is blocked by seccomp, both with
+/// the canonical option and with junk in the upper 32 bits. The kernel reads
+/// the option as an int, so the filter must ignore those bits too.
+fn test_prctl_securebits_blocked(option_high_bits: i64) -> TestResult {
+    const PR_SET_SECUREBITS: i64 = 28;
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            PR_SET_SECUREBITS | option_high_bits,
+            0i64,
+            0i64,
+            0i64,
+            0i64,
+        )
+    };
+    if ret == -1 {
+        let errno = unsafe { *libc::__errno_location() };
+        if errno == libc::ENOSYS {
+            return TestResult::Blocked;
+        }
+    }
+    TestResult::Allowed
+}
+
 /// Test that socket(2) with disallowed families is blocked,
 /// while allowed families (like AF_LOCAL) pass the filter.
 fn test_socket_families() -> TestResult {
@@ -786,6 +810,18 @@ fn run(args: Args) -> bool {
         name: "ioctl(TIOCSTI)",
         category: Category::Testable,
         result: test_ioctl_tiocsti_blocked(),
+    });
+
+    results.push(RunResult {
+        name: "prctl(PR_SET_SECUREBITS)",
+        category: Category::Testable,
+        result: test_prctl_securebits_blocked(0),
+    });
+
+    results.push(RunResult {
+        name: "prctl(PR_SET_SECUREBITS | 1 << 32)",
+        category: Category::Testable,
+        result: test_prctl_securebits_blocked(1 << 32),
     });
 
     results.push(RunResult {

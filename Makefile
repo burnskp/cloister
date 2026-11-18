@@ -123,6 +123,16 @@ test-changed:
 			tests/runtime/netns.nix) \
 				add_runtime_check test-runtime-netns \
 				;; \
+			tests/runtime/services.nix) \
+				add_runtime_check test-runtime-services \
+				;; \
+			tests/runtime/attach.nix) \
+				add_runtime_check test-runtime-attach \
+				;; \
+			modules/cloister/_services.nix) \
+				add_check test-cloister-services; \
+				add_runtime_check test-runtime-services \
+				;; \
 			flake.nix|flake.lock) \
 				checks="$(TEST_CHECKS)"; \
 				runtime_checks="$(RUNTIME_TEST_CHECKS)"; \
@@ -158,7 +168,9 @@ test-changed:
 				add_check test-cloister-worker-broker; \
 				add_runtime_check test-runtime-worker-broker; \
 				add_check test-cloister-image-store; \
-				add_runtime_check test-runtime-image-store \
+				add_runtime_check test-runtime-image-store; \
+				add_check test-cloister-services; \
+				add_runtime_check test-runtime-services \
 				;; \
 			modules/cloister/_assertions.nix) \
 				add_check test-cloister-sandbox-core; \
@@ -174,7 +186,9 @@ test-changed:
 				add_check test-cloister-worker-broker; \
 				add_runtime_check test-runtime-worker-broker; \
 				add_check test-cloister-image-store; \
-				add_runtime_check test-runtime-image-store \
+				add_runtime_check test-runtime-image-store; \
+				add_check test-cloister-services; \
+				add_runtime_check test-runtime-services \
 				;; \
 			modules/cloister/package-config.nix) \
 				add_check test-cloister-sandbox-core; \
@@ -184,7 +198,9 @@ test-changed:
 				add_runtime_check test-runtime-worker-broker; \
 				add_dbus_checks; \
 				add_check test-cloister-image-store; \
-				add_runtime_check test-runtime-image-store \
+				add_runtime_check test-runtime-image-store; \
+				add_check test-cloister-services; \
+				add_runtime_check test-runtime-services \
 				;; \
 			modules/cloister-image-store/*) \
 				add_check test-cloister-image-store; \
@@ -197,7 +213,8 @@ test-changed:
 			helpers/cloister-sandbox|helpers/cloister-sandbox/*) \
 				add_helper helpers/cloister-sandbox; \
 				add_check test-cloister-rendered-config; \
-				add_runtime_check test-runtime-sandbox-core \
+				add_runtime_check test-runtime-sandbox-core; \
+				add_runtime_check test-runtime-attach \
 				;; \
 			helpers/*) \
 				helper="$${path#helpers/}"; \

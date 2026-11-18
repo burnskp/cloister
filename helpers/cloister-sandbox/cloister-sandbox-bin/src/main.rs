@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+mod attach_mode;
+
+use cloister_sandbox_lib::attach as instance_registry;
 use cloister_sandbox_lib::broker;
 use cloister_sandbox_lib::broker_store;
 use cloister_sandbox_lib::bwrap;
@@ -36,7 +39,16 @@ static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static GRACEFUL_PID: AtomicI32 = AtomicI32::new(0);
 
 /// Host PID that should receive forced teardown signals (SIGKILL).
+///
+/// Always a direct PID: the sandbox's PID-namespace init when it was found
+/// (killing it tears down the whole namespace), otherwise the outer bubblewrap
+/// process (whose death tears down the sandbox via `--die-with-parent`).
 static FORCE_PID: AtomicI32 = AtomicI32::new(0);
+
+/// Termination signal (SIGTERM/SIGHUP) received before a child existed to
+/// forward it to. 0 means none. Checked before spawning so a stop request that
+/// arrives during setup is honored instead of silently dropped.
+static PENDING_TERMINATION: AtomicI32 = AtomicI32::new(0);
 
 /// Number of rapid consecutive SIGINTs (resets after [`SIGINT_ESCALATION_WINDOW_SECS`]).
 static SIGINT_COUNT: AtomicI32 = AtomicI32::new(0);
@@ -116,8 +128,12 @@ fn graceful_signal_target(pid: libc::pid_t) -> libc::pid_t {
     pid
 }
 
-fn force_signal_target(pid: libc::pid_t, interactive: bool) -> libc::pid_t {
-    if interactive { pid } else { -pid }
+/// Record a termination request that arrived before any child existed.
+/// Only the first request is kept. Async-signal-safe.
+fn record_pending_termination(sig: libc::c_int) {
+    if sig == libc::SIGTERM || sig == libc::SIGHUP {
+        let _ = PENDING_TERMINATION.compare_exchange(0, sig, Ordering::AcqRel, Ordering::Acquire);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +148,7 @@ struct CliArgs {
     after_netns: bool,
     broker_launch: Option<BrokerLaunchSelector>,
     broker_trusted_record_path: Option<String>,
+    service_name: Option<String>,
     sandbox_args: Vec<String>,
 }
 
@@ -283,40 +300,71 @@ fn read_proc_nspid(pid: u32) -> Result<Vec<u32>, String> {
     parse_proc_nspid(&content).map_err(|e| format!("parse {path}: {e}"))
 }
 
-fn sandbox_signal_pid(root_pid: u32) -> Result<u32, String> {
-    sandbox_signal_pid_with_reader(root_pid, read_proc_children, read_proc_nspid)
-        .map(|(pid, _)| pid)
-}
-
-fn find_signal_pids(root_pid: u32, interactive: bool) -> Result<(u32, u32), String> {
+/// Resolve `(graceful, force)` signal targets for a freshly spawned child.
+///
+/// Interactive shells are signalled directly through the outer process. For
+/// non-interactive launches, `probe` returns `(namespace PID 2, namespace
+/// init)`, or the init twice while the main process has not started yet; the
+/// loop keeps polling until the main process appears, the child exits, or the
+/// attempts run out. Whatever is known at that point is used:
+///
+/// - main process found: graceful = main process, force = namespace init
+/// - only the init found: graceful = force = init (SIGTERM is ignored by the
+///   init, so stop relies on the SIGKILL escalation)
+/// - nothing found: graceful = force = the outer process; killing it tears down
+///   the sandbox through `--die-with-parent`
+fn wait_for_signal_pids_with<P, E>(
+    root_pid: u32,
+    interactive: bool,
+    attempts: u64,
+    poll: Duration,
+    mut probe: P,
+    mut child_exited: E,
+) -> (u32, u32)
+where
+    P: FnMut(u32) -> Result<(u32, u32), String>,
+    E: FnMut() -> bool,
+{
     if interactive {
-        return Ok((root_pid, root_pid));
+        return (root_pid, root_pid);
     }
 
-    sandbox_signal_pid(root_pid).map(|graceful_pid| (graceful_pid, root_pid))
-}
-
-fn wait_for_signal_pids(root_pid: u32, interactive: bool) -> Result<(u32, u32), String> {
-    if interactive {
-        return Ok((root_pid, root_pid));
-    }
-
-    let poll = Duration::from_millis(FLATPAK_CHILD_PID_POLL_MS);
-    let attempts = FLATPAK_CHILD_PID_TIMEOUT_MS / FLATPAK_CHILD_PID_POLL_MS;
-    let mut last_err = None;
-
-    for _ in 0..attempts {
-        match find_signal_pids(root_pid, interactive) {
-            Ok(pids) => return Ok(pids),
-            Err(err) => last_err = Some(err),
+    let mut partial = None;
+    for attempt in 0..attempts {
+        match probe(root_pid) {
+            Ok((graceful, init)) if graceful != init => return (graceful, init),
+            Ok(pids) => partial = Some(pids),
+            Err(_) => {}
         }
-        thread::sleep(poll);
+        if child_exited() {
+            break;
+        }
+        if attempt + 1 < attempts {
+            thread::sleep(poll);
+        }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        format!("timed out waiting for signal target for bubblewrap pid {root_pid}")
-    }))
+    partial.unwrap_or((root_pid, root_pid))
 }
+
+fn wait_for_signal_pids(child: &mut process::Child, interactive: bool) -> (u32, u32) {
+    let root_pid = child.id();
+    wait_for_signal_pids_with(
+        root_pid,
+        interactive,
+        SIGNAL_TARGET_TIMEOUT_MS / SIGNAL_TARGET_POLL_MS,
+        Duration::from_millis(SIGNAL_TARGET_POLL_MS),
+        |pid| sandbox_signal_pid_with_reader(pid, read_proc_children, read_proc_nspid),
+        // try_wait caches the exit status, so the later wait() still sees it.
+        || !matches!(child.try_wait(), Ok(None)),
+    )
+}
+
+/// Upper bound for discovering signal targets. Polling stops as soon as the
+/// sandbox main process appears or the child exits, so this only matters on a
+/// heavily loaded host.
+const SIGNAL_TARGET_TIMEOUT_MS: u64 = 5_000;
+const SIGNAL_TARGET_POLL_MS: u64 = 10;
 
 const FLATPAK_CHILD_PID_TIMEOUT_MS: u64 = 500;
 const FLATPAK_CHILD_PID_POLL_MS: u64 = 10;
@@ -683,10 +731,12 @@ fn monotonic_seconds() -> i64 {
 /// Only uses async-signal-safe operations (atomics, `kill`, `write`, `clock_gettime`, `alarm`).
 extern "C" fn forward_signal(sig: libc::c_int) {
     let graceful_pid = GRACEFUL_PID.load(Ordering::Acquire);
-    let force_pid = FORCE_PID
-        .load(Ordering::Acquire)
-        .max(CHILD_PID.load(Ordering::Acquire));
+    let force_pid = match FORCE_PID.load(Ordering::Acquire) {
+        pid if pid > 0 => pid,
+        _ => CHILD_PID.load(Ordering::Acquire),
+    };
     if graceful_pid <= 0 && force_pid <= 0 {
+        record_pending_termination(sig);
         return;
     }
 
@@ -696,11 +746,7 @@ extern "C" fn forward_signal(sig: libc::c_int) {
     } else {
         0
     };
-    let force_target = if force_pid > 0 {
-        force_signal_target(force_pid, interactive)
-    } else {
-        0
-    };
+    let force_target = force_pid.max(0);
 
     match sig {
         libc::SIGINT => {
@@ -788,10 +834,145 @@ fn install_signal_handlers() {
 ///
 /// Blocks SIGTERM/SIGINT/SIGHUP/SIGALRM around the spawn→store window to
 /// prevent signals from being dropped when CHILD_PID is still 0.
+/// What the launcher knows about an instance before its processes exist.
+struct InstanceDraft {
+    registry: PathBuf,
+    record: instance_registry::InstanceRecord,
+}
+
+/// Publishes the running instance for `cloister-attach`, and withdraws it on exit.
+struct InstanceRegistration {
+    stop: Arc<AtomicBool>,
+    worker: thread::JoinHandle<Option<PathBuf>>,
+}
+
+impl InstanceRegistration {
+    /// Discovery runs on its own thread because interactive launches never probe
+    /// for sandbox PIDs, and the main thread is about to block in `wait`.
+    fn start(root_pid: u32, draft: InstanceDraft) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || publish_instance(root_pid, draft, &stop))
+        };
+        Self { stop, worker }
+    }
+
+    fn finish(self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(Some(path)) = self.worker.join() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn publish_instance(root_pid: u32, draft: InstanceDraft, stop: &AtomicBool) -> Option<PathBuf> {
+    let bwrap_exe = std::fs::read_link(format!("/proc/{root_pid}/exe")).ok()?;
+    for _ in 0..(SIGNAL_TARGET_TIMEOUT_MS / SIGNAL_TARGET_POLL_MS) {
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
+        if let Some(record) = locate_instance(root_pid, &bwrap_exe, &draft.record) {
+            return match instance_registry::write_record(&draft.registry, &record) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    eprintln!(
+                        "cloister-sandbox[{}]: register instance: {e}",
+                        record.sandbox
+                    );
+                    None
+                }
+            };
+        }
+        thread::sleep(Duration::from_millis(SIGNAL_TARGET_POLL_MS));
+    }
+    None
+}
+
+/// Fill in the sandbox's PIDs once PID 2 has exec'd. Until then it is a bwrap
+/// fork whose environ is still the launcher's unsanitized host environment.
+fn locate_instance(
+    root_pid: u32,
+    bwrap_exe: &Path,
+    draft: &instance_registry::InstanceRecord,
+) -> Option<instance_registry::InstanceRecord> {
+    let (main_pid, sandbox_pid1) =
+        sandbox_signal_pid_with_reader(root_pid, read_proc_children, read_proc_nspid).ok()?;
+    if main_pid == sandbox_pid1 {
+        return None;
+    }
+    let main_exe = std::fs::read_link(format!("/proc/{main_pid}/exe")).ok()?;
+    if main_exe == bwrap_exe {
+        return None;
+    }
+    Some(instance_registry::InstanceRecord {
+        sandbox_pid1,
+        sandbox_pid1_start_time: instance_registry::read_start_time(sandbox_pid1)?,
+        main_pid,
+        main_pid_start_time: instance_registry::read_start_time(main_pid)?,
+        ..draft.clone()
+    })
+}
+
+/// Build this launch's registry entry, or `None` when it cannot be listed safely.
+///
+/// A sandbox that can see the registry could forge records for other instances.
+/// Binding the whole runtime directory already hands it every host socket, so
+/// such a sandbox is left unattachable rather than refused outright.
+fn instance_draft(
+    config: &SandboxConfig,
+    host_xdg_runtime_dir: &str,
+    bwrap_args: &[String],
+    host_project: &str,
+    start_dir: &str,
+    service_name: Option<&str>,
+) -> Option<InstanceDraft> {
+    if host_xdg_runtime_dir.is_empty() {
+        return None;
+    }
+    let registry = instance_registry::registry_dir(host_xdg_runtime_dir);
+    if instance_registry::bwrap_args_expose_registry(bwrap_args, &registry) {
+        eprintln!(
+            "{}: a bind exposes {}; this instance will not be available to cloister-attach",
+            err_prefix(&config.name),
+            registry.display()
+        );
+        return None;
+    }
+    let mut shell_argv = vec![config.shell_bin.clone()];
+    shell_argv.extend_from_slice(&config.shell_interactive_args);
+    let launched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(InstanceDraft {
+        registry,
+        record: instance_registry::InstanceRecord {
+            sandbox_pid1: 0,
+            sandbox_pid1_start_time: 0,
+            main_pid: 0,
+            main_pid_start_time: 0,
+            sandbox: config.name.clone(),
+            service: service_name.map(str::to_string),
+            host_project: (!host_project.is_empty()).then(|| host_project.to_string()),
+            start_dir: start_dir.to_string(),
+            launched_at,
+            shell_argv,
+            seccomp_filter_path: config
+                .seccomp_filter_path
+                .clone()
+                .filter(|_| config.seccomp_enable),
+            network_namespace: config.network_namespace.clone(),
+            netns_helper_path: config.netns_helper_path.clone(),
+        },
+    })
+}
+
 fn spawn_and_wait(
     cmd: &mut process::Command,
     interactive: bool,
     flatpak_state: Option<&FlatpakPortalState>,
+    instance: Option<InstanceDraft>,
 ) -> io::Result<ExitStatus> {
     // Reset escalation state for new child
     SIGINT_COUNT.store(0, Ordering::Release);
@@ -820,6 +1001,15 @@ fn spawn_and_wait(
         });
     }
 
+    // A stop request that arrived during setup: honor it instead of starting
+    // a sandbox nobody can stop. Checked with the signals blocked, so a
+    // request cannot slip in between this check and storing the targets.
+    let pending = PENDING_TERMINATION.load(Ordering::Acquire);
+    if pending != 0 {
+        set_signal_mask(libc::SIG_SETMASK, &old_set, None);
+        return Ok(ExitStatus::from_raw(pending));
+    }
+
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -831,8 +1021,10 @@ fn spawn_and_wait(
         }
     };
     CHILD_PID.store(child.id() as i32, Ordering::Release);
-    let (graceful_pid, force_pid) =
-        wait_for_signal_pids(child.id(), interactive).unwrap_or((child.id(), child.id()));
+    // Started with the forwarded signals still blocked, so handlers stay on the
+    // main thread.
+    let registration = instance.map(|draft| InstanceRegistration::start(child.id(), draft));
+    let (graceful_pid, force_pid) = wait_for_signal_pids(&mut child, interactive);
     GRACEFUL_PID.store(graceful_pid as i32, Ordering::Release);
     FORCE_PID.store(force_pid as i32, Ordering::Release);
 
@@ -845,6 +1037,9 @@ fn spawn_and_wait(
         if let Err(err) = setup_result {
             let _ = child.kill();
             let _ = child.wait();
+            if let Some(registration) = registration {
+                registration.finish();
+            }
             clear_signal_targets();
             unsafe { libc::alarm(0) };
             set_signal_mask(libc::SIG_SETMASK, &old_set, None);
@@ -856,6 +1051,9 @@ fn spawn_and_wait(
     set_signal_mask(libc::SIG_SETMASK, &old_set, None);
 
     let status = child.wait();
+    if let Some(registration) = registration {
+        registration.finish();
+    }
     // Block the forwarded signals while clearing stale targets so a late
     // delivery cannot hit a recycled PID or process group.
     clear_signal_targets_blocking_signals();
@@ -1558,7 +1756,7 @@ fn handle_broker_launch_request(
         broker_launcher_path(generated_launchers, &request.profile, &request.sandbox)?;
 
     let mut cmd = process::Command::new(&launcher_path);
-    cmd.current_dir(broker::resolve_relative_launch_dir(
+    cmd.current_dir(broker::resolve_contained_launch_dir(
         host_project_root,
         &request.cwd_rel,
     )?);
@@ -1798,14 +1996,16 @@ pub fn delegated_mount_args(
 ) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     for (dest, mount) in &profile.delegated_per_dir_mounts {
-        let source = broker::resolve_delegated_per_dir_source(
-            &mount.path,
-            &session.dir_hash,
-            mount.sub_path.as_deref(),
-        )?;
+        let relative =
+            broker::delegated_per_dir_relative(&session.dir_hash, mount.sub_path.as_deref())?;
+        // The source tree may be writable from the parent sandbox, so open it
+        // without following symlinks and hand bwrap the pinned descriptor. The
+        // descriptor must stay open until bwrap is spawned; this process exits
+        // after the sandbox does, so it is intentionally kept for its lifetime.
+        let source_fd = runtime::open_dir_fd_beneath(&mount.path, &relative)?.into_raw_fd();
         let dest_path = format!("{project_root}/{dest}");
         args.extend(bwrap::delegated_per_dir_args(
-            &source, &dest_path, mount.mode,
+            source_fd, &dest_path, mount.mode,
         ));
     }
     Ok(args)
@@ -1992,6 +2192,11 @@ fn filter_child_overlay_project_bind(
 fn run() -> i32 {
     // --- 1. Parse CLI args ---
     let args: Vec<String> = std::env::args().collect();
+    // Launchers always pass --config first, so sandbox arguments can never land
+    // here: `cl-dev attach` still runs `attach` inside the sandbox.
+    if args.get(1).map(String::as_str) == Some("attach") {
+        return attach_mode::run(&args[2..]);
+    }
     let cli = parse_cli_args(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
         process::exit(2);
@@ -2096,9 +2301,12 @@ fn run() -> i32 {
             if let Some(trusted_record_path) = cli.broker_trusted_record_path.as_deref() {
                 cmd.args(["--broker-trusted-record", trusted_record_path]);
             }
+            if let Some(service_name) = cli.service_name.as_deref() {
+                cmd.args(["--service-name", service_name]);
+            }
             cmd.args(&cli.sandbox_args);
 
-            let status = spawn_and_wait(&mut cmd, false, None).unwrap_or_else(|e| {
+            let status = spawn_and_wait(&mut cmd, false, None, None).unwrap_or_else(|e| {
                 eprintln!("{prefix}: exec netns helper: {e}");
                 process::exit(127);
             });
@@ -2832,6 +3040,26 @@ fn run() -> i32 {
     // --- 11. Spawn bwrap ---
     INTERACTIVE_MODE.store(is_interactive, Ordering::Release);
 
+    let instance = {
+        let mut bind_args = config.static_bwrap_args.clone();
+        bind_args.extend(extra_args.iter().cloned());
+        for bind in &config_dynamic_binds {
+            bind_args.extend([
+                "--bind".to_string(),
+                vars::expand_vars(&bind.src, &runtime_vars),
+                "/".to_string(),
+            ]);
+        }
+        instance_draft(
+            &config,
+            &host_xdg_runtime_dir,
+            &bind_args,
+            &sandbox_dir,
+            &effective_start_dir,
+            cli.service_name.as_deref(),
+        )
+    };
+
     let config_for_bwrap = SandboxConfig {
         dynamic_binds: config_dynamic_binds,
         ..config
@@ -2864,7 +3092,12 @@ fn run() -> i32 {
         }
     };
 
-    let status = match spawn_and_wait(&mut cmd, is_interactive, flatpak_portal_state.as_ref()) {
+    let status = match spawn_and_wait(
+        &mut cmd,
+        is_interactive,
+        flatpak_portal_state.as_ref(),
+        instance,
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{prefix}: exec bwrap: {e}");
@@ -3081,6 +3314,7 @@ fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
         after_netns: false,
         broker_launch: None,
         broker_trusted_record_path: None,
+        service_name: None,
         sandbox_args: Vec::new(),
     };
     let mut i = 1;
@@ -3130,6 +3364,15 @@ fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
                     );
                 }
                 set_broker_trusted_record_path(&mut parsed, args[i].clone())?;
+            }
+            "--service-name" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("cloister-sandbox: --service-name requires a name".to_string());
+                }
+                if parsed.service_name.replace(args[i].clone()).is_some() {
+                    return Err("cloister-sandbox: duplicate --service-name".to_string());
+                }
             }
             "--" => {
                 past_separator = true;
@@ -3226,11 +3469,51 @@ mod tests {
         .expect("valid config")
     }
 
+    fn fixture_dir_hash() -> String {
+        runtime::compute_dir_hash("/workspace/project")
+    }
+
+    /// Real on-disk sources for the fixture's delegated mounts, which are
+    /// opened as pinned descriptors.
+    fn delegated_fixture_root() -> String {
+        create_delegated_fixture_dirs(&fixture_dir_hash())
+    }
+
+    fn create_delegated_fixture_dirs(hash: &str) -> String {
+        let root =
+            std::env::temp_dir().join(format!("cloister-delegated-fixture-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("worktrees/dev").join(hash)).unwrap();
+        std::fs::create_dir_all(
+            root.join("ephemeral/dev")
+                .join(hash)
+                .join(".cache/pre-commit"),
+        )
+        .unwrap();
+        root.to_str().unwrap().to_string()
+    }
+
+    /// Replace descriptor numbers after `--bind-fd`/`--ro-bind-fd` with `<fd>`.
+    fn normalize_fd_args(args: Vec<String>) -> Vec<String> {
+        let mut out = Vec::with_capacity(args.len());
+        let mut after_fd_flag = false;
+        for arg in args {
+            if after_fd_flag {
+                arg.parse::<RawFd>().expect("fd argument");
+                out.push("<fd>".to_string());
+                after_fd_flag = false;
+                continue;
+            }
+            after_fd_flag = arg == "--bind-fd" || arg == "--ro-bind-fd";
+            out.push(arg);
+        }
+        out
+    }
+
     fn broker_session_fixture() -> broker::BrokerSession {
         broker::BrokerSession {
             token: "token-1".to_string(),
             project_root: "/workspace/project".to_string(),
-            dir_hash: "abc123def456".to_string(),
+            dir_hash: fixture_dir_hash(),
             profiles: BTreeMap::from([
                 (
                     "overlay".to_string(),
@@ -3242,7 +3525,7 @@ mod tests {
                                 "worktrees".to_string(),
                                 DelegatedPerDirMount {
                                     mode: DelegatedAccessMode::Rw,
-                                    path: "/local/worktrees/dev".to_string(),
+                                    path: format!("{}/worktrees/dev", delegated_fixture_root()),
                                     sub_path: None,
                                 },
                             ),
@@ -3250,7 +3533,7 @@ mod tests {
                                 ".cache/pre-commit".to_string(),
                                 DelegatedPerDirMount {
                                     mode: DelegatedAccessMode::Ro,
-                                    path: "/local/ephemeral/dev".to_string(),
+                                    path: format!("{}/ephemeral/dev", delegated_fixture_root()),
                                     sub_path: Some(".cache/pre-commit".to_string()),
                                 },
                             ),
@@ -3370,16 +3653,61 @@ mod tests {
         let profile = lookup_child_profile(&session, "overlay").unwrap();
 
         assert_eq!(
-            delegated_mount_args(&session, profile, &session.project_root).unwrap(),
+            normalize_fd_args(
+                delegated_mount_args(&session, profile, &session.project_root).unwrap()
+            ),
             vec![
-                "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                "--ro-bind-fd",
+                "<fd>",
                 "/workspace/project/.cache/pre-commit",
-                "--bind",
-                "/local/worktrees/dev/abc123def456",
+                "--bind-fd",
+                "<fd>",
                 "/workspace/project/worktrees",
             ]
         );
+    }
+
+    #[test]
+    fn broker_delegated_mount_args_pin_the_resolved_source_directory() {
+        let session = broker_session_fixture();
+        let profile = lookup_child_profile(&session, "overlay").unwrap();
+        let args = delegated_mount_args(&session, profile, &session.project_root).unwrap();
+
+        let fd = args[args.iter().position(|a| a == "--bind-fd").unwrap() + 1]
+            .parse::<RawFd>()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap(),
+            std::path::Path::new(&delegated_fixture_root())
+                .join("worktrees/dev")
+                .join(fixture_dir_hash())
+        );
+    }
+
+    #[test]
+    fn broker_delegated_mount_args_reject_symlinked_source() {
+        let base = temp_test_dir("delegated-symlink-source");
+        let outside = temp_test_dir("delegated-symlink-outside");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut session = broker_session_fixture();
+        std::os::unix::fs::symlink(&outside, base.join(&session.dir_hash)).unwrap();
+        let profile = session.profiles.get_mut("overlay").unwrap();
+        profile
+            .delegated_per_dir_mounts
+            .retain(|dest, _| dest == "worktrees");
+        profile
+            .delegated_per_dir_mounts
+            .get_mut("worktrees")
+            .unwrap()
+            .path = base.to_str().unwrap().to_string();
+        let profile = lookup_child_profile(&session, "overlay").unwrap();
+
+        let err = delegated_mount_args(&session, profile, &session.project_root).unwrap_err();
+        assert!(err.contains("refusing to traverse symlink"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -4184,17 +4512,17 @@ mod tests {
         .unwrap()
         .expect("child broker args");
         assert_eq!(
-            args,
+            normalize_fd_args(args),
             s(&[
                 "--overlay-src",
                 "/workspace/project",
                 "--tmp-overlay",
                 "/workspace/project",
-                "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                "--ro-bind-fd",
+                "<fd>",
                 "/workspace/project/.cache/pre-commit",
-                "--bind",
-                "/local/worktrees/dev/abc123def456",
+                "--bind-fd",
+                "<fd>",
                 "/workspace/project/worktrees",
             ])
         );
@@ -4312,6 +4640,7 @@ mod tests {
         let mut session = broker_session_fixture();
         session.project_root = "/home/ubuntu/src/project".to_string();
         session.dir_hash = runtime::compute_dir_hash("/home/alice/src/project");
+        create_delegated_fixture_dirs(&session.dir_hash);
         let trusted_record = temp_test_dir("child-broker-mixed-view").join("session.json");
         std::fs::create_dir_all(trusted_record.parent().unwrap()).unwrap();
         std::fs::write(&trusted_record, serde_json::to_vec(&session).unwrap()).unwrap();
@@ -4421,6 +4750,7 @@ mod tests {
         let mut session = broker_session_fixture();
         session.project_root = "/home/ubuntu/src/project".to_string();
         session.dir_hash = runtime::compute_dir_hash("/home/alice/src/project");
+        create_delegated_fixture_dirs(&session.dir_hash);
         let trusted_record = temp_test_dir("child-broker-hash-mismatch").join("session.json");
         std::fs::create_dir_all(trusted_record.parent().unwrap()).unwrap();
         std::fs::write(&trusted_record, serde_json::to_vec(&session).unwrap()).unwrap();
@@ -4474,6 +4804,7 @@ mod tests {
         let mut session = broker_session_fixture();
         session.project_root = "/home/ubuntu/src/project".to_string();
         session.dir_hash = runtime::compute_dir_hash("/home/alice/src/project");
+        create_delegated_fixture_dirs(&session.dir_hash);
         let trusted_record =
             temp_test_dir("child-broker-capability-path-match").join("session.json");
         std::fs::create_dir_all(trusted_record.parent().unwrap()).unwrap();
@@ -4593,27 +4924,29 @@ mod tests {
         std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000-child");
 
         assert_eq!(
-            child_broker_args_with_store_dir(
-                "worker",
-                None,
-                "/workspace/project",
-                "/workspace/project",
-                "/run/user/1000-child",
-                Some(trusted_record.as_path()),
-                Some("/workspace/project"),
-            )
-            .unwrap()
-            .unwrap(),
+            normalize_fd_args(
+                child_broker_args_with_store_dir(
+                    "worker",
+                    None,
+                    "/workspace/project",
+                    "/workspace/project",
+                    "/run/user/1000-child",
+                    Some(trusted_record.as_path()),
+                    Some("/workspace/project"),
+                )
+                .unwrap()
+                .unwrap()
+            ),
             vec![
                 "--overlay-src",
                 "/workspace/project",
                 "--tmp-overlay",
                 "/workspace/project",
-                "--ro-bind",
-                "/local/ephemeral/dev/abc123def456/.cache/pre-commit",
+                "--ro-bind-fd",
+                "<fd>",
                 "/workspace/project/.cache/pre-commit",
-                "--bind",
-                "/local/worktrees/dev/abc123def456",
+                "--bind-fd",
+                "<fd>",
                 "/workspace/project/worktrees",
             ]
         );
@@ -5131,6 +5464,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_service_name_is_consumed_before_sandbox_args() {
+        let args: Vec<String> = [
+            "prog",
+            "--config",
+            "/c",
+            "--service-name",
+            "paseo",
+            "--",
+            "-c",
+            "x",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let parsed = parse_cli_args(&args).unwrap();
+        assert_eq!(parsed.service_name.as_deref(), Some("paseo"));
+        assert_eq!(parsed.sandbox_args, vec!["-c", "x"]);
+    }
+
+    #[test]
+    fn parse_service_name_after_separator_belongs_to_the_sandbox() {
+        let args: Vec<String> = ["prog", "--config", "/c", "--", "--service-name", "x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let parsed = parse_cli_args(&args).unwrap();
+        assert_eq!(parsed.service_name, None);
+        assert_eq!(parsed.sandbox_args, vec!["--service-name", "x"]);
+    }
+
+    #[test]
     fn parse_after_netns() {
         let args = s(&[
             "cloister-sandbox",
@@ -5534,6 +5898,7 @@ mod tests {
     /// Reset signal-handler statics so tests don't interfere with each other.
     fn reset_signal_state() {
         clear_signal_targets();
+        PENDING_TERMINATION.store(0, Ordering::Release);
         SIGINT_COUNT.store(0, Ordering::Release);
         LAST_SIGINT_SEC.store(0, Ordering::Release);
         INTERACTIVE_MODE.store(false, Ordering::Release);
@@ -5687,14 +6052,123 @@ mod tests {
         reset_signal_state();
     }
 
-    #[test]
-    fn signal_target_uses_process_group_for_noninteractive_children() {
-        assert_eq!(force_signal_target(1234, false), -1234);
+    fn no_sleep() -> Duration {
+        Duration::from_millis(0)
     }
 
     #[test]
-    fn signal_target_uses_direct_pid_for_interactive_children() {
-        assert_eq!(force_signal_target(1234, true), 1234);
+    fn signal_targets_use_outer_process_for_interactive_children() {
+        let targets = wait_for_signal_pids_with(
+            100,
+            true,
+            5,
+            no_sleep(),
+            |_| panic!("interactive launches must not probe"),
+            || false,
+        );
+        assert_eq!(targets, (100, 100));
+    }
+
+    #[test]
+    fn signal_targets_wait_for_sandbox_main_process() {
+        let mut calls = 0;
+        let targets = wait_for_signal_pids_with(
+            100,
+            false,
+            10,
+            no_sleep(),
+            |_| {
+                calls += 1;
+                match calls {
+                    1 => Err("no children yet".to_string()),
+                    2 => Ok((300, 300)),
+                    _ => Ok((301, 300)),
+                }
+            },
+            || false,
+        );
+        assert_eq!(targets, (301, 300));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn signal_targets_fall_back_to_namespace_init_when_main_process_never_appears() {
+        let targets =
+            wait_for_signal_pids_with(100, false, 3, no_sleep(), |_| Ok((300, 300)), || false);
+        assert_eq!(targets, (300, 300));
+    }
+
+    #[test]
+    fn signal_targets_fall_back_to_outer_process_when_nothing_is_found() {
+        let targets = wait_for_signal_pids_with(
+            100,
+            false,
+            3,
+            no_sleep(),
+            |_| Err("not found".to_string()),
+            || false,
+        );
+        assert_eq!(targets, (100, 100));
+    }
+
+    #[test]
+    fn signal_targets_stop_polling_when_child_exits() {
+        let mut calls = 0;
+        let targets = wait_for_signal_pids_with(
+            100,
+            false,
+            1_000,
+            no_sleep(),
+            |_| {
+                calls += 1;
+                Err("gone".to_string())
+            },
+            || true,
+        );
+        assert_eq!(targets, (100, 100));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn termination_before_child_is_recorded_once() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        forward_signal(libc::SIGINT);
+        forward_signal(libc::SIGALRM);
+        assert_eq!(PENDING_TERMINATION.load(Ordering::Acquire), 0);
+        forward_signal(libc::SIGHUP);
+        forward_signal(libc::SIGTERM);
+        assert_eq!(PENDING_TERMINATION.load(Ordering::Acquire), libc::SIGHUP);
+        reset_signal_state();
+    }
+
+    #[test]
+    fn spawn_and_wait_skips_spawn_after_pending_termination() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        forward_signal(libc::SIGTERM);
+
+        let marker = temp_test_dir("pending-termination").join("spawned");
+        let mut cmd = process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!("touch '{}'", marker.display()));
+        let status = spawn_and_wait(&mut cmd, false, None, None).unwrap();
+
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        assert!(!marker.exists(), "child must not be spawned");
+        reset_signal_state();
+    }
+
+    #[test]
+    fn sigalrm_force_kills_child_directly() {
+        let _guard = signal_lock().lock().unwrap();
+        reset_signal_state();
+        let mut child = process::Command::new("sleep").arg("30").spawn().unwrap();
+        GRACEFUL_PID.store(child.id() as i32, Ordering::Release);
+        FORCE_PID.store(child.id() as i32, Ordering::Release);
+        forward_signal(libc::SIGALRM);
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        reset_signal_state();
     }
 
     #[test]

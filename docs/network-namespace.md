@@ -118,7 +118,20 @@ cloister-netns.networks.lanonly = {
 };
 ```
 
-> **Firewall:** LAN namespaces are firewalled. The namespace can only reach configured `allowedRanges` and cannot access host services directly. An `input` chain on the host drops unsolicited traffic from the namespace, and a `forward` chain restricts outbound destinations to allowed CIDRs. IP forwarding (`net.ipv4.ip_forward`) is enabled declaratively via `boot.kernel.sysctl` when any LAN namespace is configured. IPv6 is disabled on the managed veth pair, and `ip6` nftables drop rules are installed so the default posture stays deny-by-default even if IPv6 is enabled later.
+A LAN namespace can also reach selected host loopback ports through `allowedHostPorts`. This is useful for a host-side relay that the sandbox must reach while it also has general outbound access:
+
+```nix
+cloister-netns.networks.dev = {
+  type = "lan";
+  allowedRanges = [ "0.0.0.0/0" ];
+  allowedHostPorts = [ 8417 ];
+  dns.nameservers = [ "100.100.100.100" ];
+};
+```
+
+Inside the namespace, `host.internal:8417` is DNAT'd to `127.0.0.1:8417` on the host. Only traffic addressed to the host-side veth address is rewritten, so traffic to `allowedRanges` is unaffected.
+
+> **Firewall:** LAN namespaces are firewalled. The namespace can only reach configured `allowedRanges` and cannot access host services directly, except for ports listed in `allowedHostPorts`, which are the only exception to the input drop. An `input` chain on the host drops unsolicited traffic from the namespace, and a `forward` chain restricts outbound destinations to allowed CIDRs. IP forwarding (`net.ipv4.ip_forward`) is enabled declaratively via `boot.kernel.sysctl` when any LAN namespace is configured. IPv6 is disabled on the managed veth pair, and `ip6` nftables drop rules are installed so the default posture stays deny-by-default even if IPv6 is enabled later.
 
 ## Effective packet rules summary
 
@@ -131,7 +144,8 @@ cloister-netns.networks.lanonly = {
 - `forward` allows only destinations in `allowedRanges` from `veth-<name>`.
 - Return traffic to `veth-<name>` is allowed (established/related).
 - All other namespace-originated forwarding traffic is dropped.
-- `input` from `veth-<name>` is dropped except established/related packets.
+- `prerouting` DNATs TCP/UDP traffic from `veth-<name>` addressed to the host-side veth IP on `allowedHostPorts` to `127.0.0.1` (only when `allowedHostPorts` is non-empty).
+- `input` from `veth-<name>` is dropped except established/related packets and new TCP/UDP traffic to `127.0.0.1` on `allowedHostPorts`.
 - IPv6 traffic from or to `veth-<name>` is dropped.
 
 ### Isolated namespace
@@ -237,6 +251,7 @@ cloister-netns.networks.vpn = {
 | Option | Type | Default | Purpose |
 |--------|------|---------|---------|
 | `allowedRanges` | nullOr listOf str | `null` | CIDR ranges the namespace can reach; `null` uses RFC1918 ranges for LAN namespaces |
+| `allowedHostPorts` | listOf port | `[]` | Host loopback ports reachable as `host.internal:<port>` (DNAT to `127.0.0.1`); also opens them on `networking.firewall.interfaces."veth-<name>"` and enables `route_localnet` on the veth |
 
 ### Isolated network type
 

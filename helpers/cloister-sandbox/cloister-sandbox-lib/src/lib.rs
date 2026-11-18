@@ -1,3 +1,4 @@
+pub mod attach;
 pub mod broker;
 pub mod broker_store;
 pub mod bwrap;

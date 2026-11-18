@@ -32,6 +32,37 @@ let
     };
   };
 
+  lanHostPortsEval = nixos.netns {
+    cloister-netns = {
+      networks.lan = {
+        type = "lan";
+        allowedRanges = [ "0.0.0.0/0" ];
+        allowedHostPorts = [ 8417 ];
+      };
+    };
+  };
+
+  localhostHostPorts = nixos.netns {
+    cloister-netns = {
+      networks.dev = {
+        type = "localhost";
+        allowedHostPorts = [ 8417 ];
+      };
+    };
+  };
+
+  duplicateHostPorts = nixos.netns {
+    cloister-netns = {
+      networks.lan = {
+        type = "lan";
+        allowedHostPorts = [
+          8417
+          8417
+        ];
+      };
+    };
+  };
+
   customGroup = nixos.netns {
     cloister-netns = {
       group = "sandboxers";
@@ -297,6 +328,12 @@ let
   evalDevStart = builtins.readFile evalServices."cloister-netns-dev".serviceConfig.ExecStart;
   evalDevNft = nftRulesFromStart evalDevStart;
   evalLanStart = builtins.readFile evalServices."cloister-netns-lan".serviceConfig.ExecStart;
+  evalLanNft = nftRulesFromStart evalLanStart;
+  evalLanStop = builtins.readFile evalServices."cloister-netns-lan".serviceConfig.ExecStop;
+  hostPortsLanService = lanHostPortsEval.config.systemd.services."cloister-netns-lan";
+  hostPortsLanStart = builtins.readFile hostPortsLanService.serviceConfig.ExecStart;
+  hostPortsLanStop = builtins.readFile hostPortsLanService.serviceConfig.ExecStop;
+  hostPortsLanNft = nftRulesFromStart hostPortsLanStart;
   fileBackedServices = fileBackedInputsEval.config.systemd.services;
   fileBackedVpnStart =
     builtins.readFile
@@ -361,6 +398,59 @@ checks.mkCheck "test-cloister-netns" [
     ''iifname "veth-dev" tcp dport { 3000 } dnat to 127.0.0.1''
     evalDevNft
   )
+  (checks.expectContains "lan host ports DNAT tcp only for the host veth address"
+    ''iifname "veth-lan" ip daddr 172.29.0.1 tcp dport { 8417 } dnat to 127.0.0.1''
+    hostPortsLanNft
+  )
+  (checks.expectContains "lan host ports DNAT udp only for the host veth address"
+    ''iifname "veth-lan" ip daddr 172.29.0.1 udp dport { 8417 } dnat to 127.0.0.1''
+    hostPortsLanNft
+  )
+  (expectOrdered "lan host ports input accept precedes the veth drop"
+    ''iifname "veth-lan" ip daddr 127.0.0.1 tcp dport { 8417 } accept''
+    ''iifname "veth-lan" drop''
+    hostPortsLanNft
+  )
+  (checks.expectContains "lan host ports input accepts udp"
+    ''iifname "veth-lan" ip daddr 127.0.0.1 udp dport { 8417 } accept''
+    hostPortsLanNft
+  )
+  (checks.expectContains "lan host ports keep forward range filter"
+    ''iifname "veth-lan" ip daddr { 0.0.0.0/0 } accept''
+    hostPortsLanNft
+  )
+  (checks.expectContains "lan host ports write host.internal" "172.29.0.1 host.internal"
+    hostPortsLanStart
+  )
+  (checks.expectContains "lan host ports enable route_localnet"
+    "sysctl -w net.ipv4.conf.veth-lan.route_localnet=1"
+    hostPortsLanStart
+  )
+  (checks.expectContains "lan host ports keep forwarding enabled"
+    "sysctl -w net.ipv4.conf.veth-lan.forwarding=1"
+    hostPortsLanStart
+  )
+  (checks.expectContains "lan host ports reset route_localnet on stop"
+    "sysctl -w net.ipv4.conf.veth-lan.route_localnet=0"
+    hostPortsLanStop
+  )
+  (checks.expectEq "lan host ports open TCP firewall" [
+    8417
+  ] lanHostPortsEval.config.networking.firewall.interfaces."veth-lan".allowedTCPPorts)
+  (checks.expectEq "lan host ports open UDP firewall" [
+    8417
+  ] lanHostPortsEval.config.networking.firewall.interfaces."veth-lan".allowedUDPPorts)
+  (checks.expectNotContains "default lan has no DNAT" "dnat" evalLanNft)
+  (checks.expectNotContains "default lan has no prerouting chain" "prerouting" evalLanNft)
+  (checks.expectNotContains "default lan input has no port accepts" "dport" evalLanNft)
+  (checks.expectNotContains "default lan has no host.internal" "host.internal" evalLanStart)
+  (checks.expectNotContains "default lan leaves route_localnet alone" "route_localnet" evalLanStart)
+  (checks.expectNotContains "default lan stop leaves route_localnet alone" "route_localnet"
+    evalLanStop
+  )
+  (checks.expectFalse "default lan opens no firewall interface" (
+    eval.config.networking.firewall.interfaces ? "veth-lan"
+  ))
   (checks.expectEq "localhost service skips network-online target in auto mode" [ ] (
     evalServices."cloister-netns-dev".after or [ ]
   ))
@@ -431,6 +521,12 @@ checks.mkCheck "test-cloister-netns" [
   (checks.expectAssertionMessage "empty localhost port list is rejected"
     emptyLocalhostPorts.assertions
     "allowedPorts must be non-empty when set"
+  )
+  (checks.expectAssertionMessage "allowedHostPorts is lan-only" localhostHostPorts.assertions
+    "allowedHostPorts is only valid when type is `lan`"
+  )
+  (checks.expectAssertionMessage "allowedHostPorts rejects duplicates" duplicateHostPorts.assertions
+    "allowedHostPorts contains duplicate ports: 8417"
   )
   (checks.expectAssertionMessage "veth interface names must stay short" ifnameTooLong.assertions
     "veth interface name"

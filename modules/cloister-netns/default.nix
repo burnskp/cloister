@@ -152,6 +152,11 @@ let
         default = null;
         description = "CIDR ranges a LAN namespace is allowed to reach. Defaults to RFC1918 ranges when type is `lan`.";
       };
+      allowedHostPorts = lib.mkOption {
+        type = lib.types.listOf lib.types.port;
+        default = [ ];
+        description = "Host loopback ports reachable from a LAN namespace as `host.internal:<port>` (DNAT to 127.0.0.1). Only valid when type is `lan`.";
+      };
       dns = lib.mkOption {
         type = lib.types.submodule {
           options = {
@@ -433,7 +438,7 @@ let
       hostAddress,
       namespaceAddress,
       nftRules,
-      sysctlKey,
+      sysctlKeys,
       hostInternalIp ? null,
     }:
     let
@@ -447,7 +452,9 @@ let
       stopScript = mkNetnsStopScript name ''
         nft delete table ip cloister-netns-${escapedName} || true
         nft delete table ip6 cloister-netns-${escapedName} || true
-        sysctl -w net.ipv4.conf.${escapedVethHost}.${sysctlKey}=0 || true
+        ${lib.concatMapStringsSep "\n" (
+          key: "sysctl -w net.ipv4.conf.${escapedVethHost}.${key}=0 || true"
+        ) sysctlKeys}
         sysctl -w net.ipv6.conf.${escapedVethHost}.disable_ipv6=0 || true
       '';
     in
@@ -477,7 +484,9 @@ let
           ip link set ${escapedVethHost} up
           ip -n ${escapedName} link set ${escapedVethNs} up
           ip -n ${escapedName} route add default via ${hostIp}
-          sysctl -w net.ipv4.conf.${escapedVethHost}.${sysctlKey}=1
+          ${lib.concatMapStringsSep "\n" (
+            key: "sysctl -w net.ipv4.conf.${escapedVethHost}.${key}=1"
+          ) sysctlKeys}
           nft -f ${nftRulesFile}
           ${mkResolvConf name netCfg.dns}
           ${mkHostsFile name hostInternalIp}
@@ -506,7 +515,7 @@ let
         namespaceAddress
         ;
       typeName = "localhost";
-      sysctlKey = "route_localnet";
+      sysctlKeys = [ "route_localnet" ];
       hostInternalIp = builtins.head (lib.splitString "/" hostAddress);
       nftRules = ''
         table ip cloister-netns-${name} {
@@ -547,11 +556,14 @@ let
   mkLanService =
     name: netCfg:
     let
-      inherit (netCfg) hostAddress namespaceAddress;
+      inherit (netCfg) hostAddress namespaceAddress allowedHostPorts;
       allowedRanges =
         if netCfg.allowedRanges == null then defaultLanAllowedRanges else netCfg.allowedRanges;
       vethHost = "veth-${name}";
+      hostIp = builtins.head (lib.splitString "/" hostAddress);
       rangeList = lib.concatStringsSep ", " allowedRanges;
+      hasHostPorts = allowedHostPorts != [ ];
+      hostPortList = lib.concatMapStringsSep ", " toString allowedHostPorts;
     in
     mkVethService {
       inherit
@@ -561,9 +573,17 @@ let
         namespaceAddress
         ;
       typeName = "LAN";
-      sysctlKey = "forwarding";
+      sysctlKeys = [ "forwarding" ] ++ lib.optional hasHostPorts "route_localnet";
+      hostInternalIp = if hasHostPorts then hostIp else null;
       nftRules = ''
         table ip cloister-netns-${name} {
+        ${lib.optionalString hasHostPorts ''
+          chain prerouting {
+            type nat hook prerouting priority dstnat; policy accept;
+            iifname "${vethHost}" ip daddr ${hostIp} tcp dport { ${hostPortList} } dnat to 127.0.0.1
+            iifname "${vethHost}" ip daddr ${hostIp} udp dport { ${hostPortList} } dnat to 127.0.0.1
+          }
+        ''}
           chain forward {
             type filter hook forward priority filter; policy accept;
             iifname "${vethHost}" ip daddr { ${rangeList} } accept
@@ -574,6 +594,10 @@ let
          chain input {
            type filter hook input priority filter; policy accept;
            iifname "${vethHost}" ct state established,related accept
+        ${lib.optionalString hasHostPorts ''
+          iifname "${vethHost}" ip daddr 127.0.0.1 tcp dport { ${hostPortList} } accept
+          iifname "${vethHost}" ip daddr 127.0.0.1 udp dport { ${hostPortList} } accept
+        ''}
            iifname "${vethHost}" drop
          }
          chain postrouting {
@@ -684,6 +708,14 @@ let
     )
   ) localhostNets;
 
+  lanFirewallInterfaces = lib.mapAttrs' (
+    name: net:
+    lib.nameValuePair "veth-${name}" {
+      allowedTCPPorts = lib.mkDefault net.allowedHostPorts;
+      allowedUDPPorts = lib.mkDefault net.allowedHostPorts;
+    }
+  ) (lib.filterAttrs (_: net: net.allowedHostPorts != [ ]) lanNets);
+
   # ── Assertion helpers ─────────────────────────────────────────────────
 
   networkAssertions = lib.concatLists (
@@ -791,11 +823,22 @@ let
       ++ lib.optionals hasLan (
         let
           invalidRanges = builtins.filter (r: builtins.match cidrPattern r == null) effectiveAllowedRanges;
+          duplicateHostPorts = map lib.toInt (
+            lib.attrNames (
+              lib.filterAttrs (_: v: builtins.length v > 1) (builtins.groupBy toString net.allowedHostPorts)
+            )
+          );
         in
         [
           {
             assertion = builtins.length effectiveAllowedRanges > 0;
             message = "cloister-netns.networks.${name}: allowedRanges must be non-empty.";
+          }
+          {
+            assertion = duplicateHostPorts == [ ];
+            message = "cloister-netns.networks.${name}: allowedHostPorts contains duplicate ports: ${
+              lib.concatMapStringsSep ", " toString duplicateHostPorts
+            }.";
           }
           {
             assertion = invalidRanges == [ ];
@@ -819,6 +862,10 @@ let
         {
           assertion = net.allowedRanges == null;
           message = "cloister-netns.networks.${name}: allowedRanges is only valid when type is `lan`.";
+        }
+        {
+          assertion = net.allowedHostPorts == [ ];
+          message = "cloister-netns.networks.${name}: allowedHostPorts is only valid when type is `lan`.";
         }
       ]
       ++ lib.optionals hasIsolated [
@@ -932,7 +979,7 @@ in
 
     boot.kernel.sysctl = lib.mkIf (lanNets != { }) { "net.ipv4.ip_forward" = 1; };
 
-    networking.firewall.interfaces = localhostFirewallInterfaces;
+    networking.firewall.interfaces = localhostFirewallInterfaces // lanFirewallInterfaces;
 
     systemd.services = wireguardServices // localhostServices // lanServices // isolatedServices;
   };

@@ -55,6 +55,83 @@ let
     })
   ];
 
+  serviceModule = {
+    options = {
+      sandbox = lib.mkOption {
+        type = lib.types.str;
+        description = "Name of the cloister.sandboxes entry whose policy, packages, and state this service runs with.";
+      };
+
+      command = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        example = [
+          "paseo"
+          "daemon"
+        ];
+        description = "Command argv run inside the sandbox. Executed directly, not through a shell.";
+      };
+
+      workingDirectory = lib.mkOption {
+        type = lib.types.str;
+        example = "cloister/paseo";
+        description = ''
+          Host directory bound read-write as the service's project root, exactly as
+          if you had run cl-<sandbox> from it. Absolute or home-relative. Created
+          (mode 0700) on start if missing. The launcher pins CLOISTER_DIR to this
+          path, so an enclosing git work tree never widens the project root.
+        '';
+      };
+
+      readWrite = lib.mkOption {
+        type = lib.types.listOf bindEntryType;
+        default = [ ];
+        description = ''
+          Extra read-write binds added on top of the sandbox's sandbox.readWrite.
+          Same syntax: absolute or home-relative paths. Missing non-optional
+          sources are created as directories (mode 0700) on start.
+        '';
+      };
+
+      readOnly = lib.mkOption {
+        type = lib.types.listOf bindEntryType;
+        default = [ ];
+        description = "Extra read-only binds added on top of the sandbox's sandbox.readOnly. Same syntax.";
+      };
+
+      env = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        description = "Extra environment variables set inside the sandbox, merged over the sandbox's sandbox.env.";
+      };
+
+      network.namespace = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Network namespace to join instead of the sandbox's own network setting. Requires the cloister-netns NixOS module.";
+      };
+
+      autoStart = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Start the service with the user session (WantedBy=default.target). Use `loginctl enable-linger` to keep it running after logout.";
+      };
+
+      extraServiceConfig = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.attrsOf lib.types.anything);
+        default = { };
+        example = {
+          Service.RestartSec = 30;
+        };
+        description = ''
+          Extra unit sections recursively merged over the generated unit
+          (Unit, Service, Install). Cloister deliberately sets no systemd
+          sandboxing directives; NoNewPrivileges breaks network namespaces and
+          PrivateUsers interferes with bubblewrap.
+        '';
+      };
+    };
+  };
+
   copyEntryType = lib.types.submodule {
     options = {
       src = lib.mkOption {
@@ -1462,6 +1539,24 @@ in
       type = lib.types.attrsOf (lib.types.submodule sandboxModule);
       default = { };
       description = "Per-sandbox configurations. Each attribute name becomes a sandbox (cl-<name>) and must match ^[A-Za-z0-9_-]+$.";
+    };
+
+    _internal.serviceInternals = lib.mkOption {
+      type = lib.types.attrs;
+      default = { };
+      internal = true;
+      description = "Internal rendered service helper data consumed by tests.";
+    };
+
+    services = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule serviceModule);
+      default = { };
+      description = ''
+        Long-running commands supervised as systemd user services inside a
+        Cloister sandbox. Each attribute name becomes the unit
+        cloister-service-<name>.service and the launcher cloister-service-<name>,
+        and must match ^[A-Za-z0-9_-]+$. See docs/services.md.
+      '';
     };
   };
 }

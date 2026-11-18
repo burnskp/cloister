@@ -22,6 +22,18 @@ pub fn validate_strict_home_policy(sandbox_dir: &str, home_dir: &str) -> Result<
         );
     }
 
+    // Protect the current home's dot-directories regardless of where the home
+    // lives; the sibling-home heuristic below is skipped for homes under "/".
+    if let Ok(relative) = sandbox.strip_prefix(home) {
+        if let Some(first) = relative.components().next() {
+            if first.as_os_str().to_string_lossy().starts_with('.') {
+                return Err(format!(
+                    "Cannot sandbox a dot-directory within a user home ({sandbox_dir})."
+                ));
+            }
+        }
+    }
+
     let home_parent = match home.parent() {
         Some(p) if p != Path::new("/") => p,
         _ => return Ok(()),
@@ -129,6 +141,19 @@ mod tests {
         let result = validate_strict_home_policy("/home/user/.ssh", "/home/user");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("dot-directory"));
+    }
+
+    #[test]
+    fn strict_home_rejects_dot_dir_in_root_level_home() {
+        let result = validate_strict_home_policy("/alice/.ssh", "/alice");
+        assert!(result.unwrap_err().contains("dot-directory"));
+        let result = validate_strict_home_policy("/alice/.config/gh", "/alice");
+        assert!(result.unwrap_err().contains("dot-directory"));
+    }
+
+    #[test]
+    fn strict_home_allows_subdir_in_root_level_home() {
+        assert!(validate_strict_home_policy("/alice/src", "/alice").is_ok());
     }
 
     #[test]

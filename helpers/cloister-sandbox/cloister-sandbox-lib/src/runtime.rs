@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Write;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -26,27 +27,38 @@ pub fn detect_sandbox_dir(git_path: &str) -> Result<String, String> {
     let current_dir = fs::canonicalize(&current_dir)
         .map_err(|e| format!("cannot resolve current directory: {e}"))?;
 
-    let sandbox_dir = if let Ok(cloister_dir) = std::env::var("CLOISTER_DIR") {
-        cloister_dir
-    } else if let Ok(output) = Command::new(git_path)
-        .args(["rev-parse", "--show-toplevel"])
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        } else {
-            current_dir.to_string_lossy().to_string()
-        }
-    } else {
-        current_dir.to_string_lossy().to_string()
+    let sandbox_dir = match std::env::var_os("CLOISTER_DIR") {
+        Some(cloister_dir) => PathBuf::from(cloister_dir),
+        None => match Command::new(git_path)
+            .args(["rev-parse", "--show-toplevel"])
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8(output.stdout)
+                    .map_err(|_| "git repository root is not valid UTF-8".to_string())?;
+                PathBuf::from(stdout.trim())
+            }
+            _ => current_dir,
+        },
     };
 
     // Resolve to absolute path
-    let resolved = fs::canonicalize(&sandbox_dir)
-        .map_err(|e| format!("cannot resolve sandbox directory '{sandbox_dir}': {e}"))?;
+    let resolved = fs::canonicalize(&sandbox_dir).map_err(|e| {
+        format!(
+            "cannot resolve sandbox directory '{}': {e}",
+            sandbox_dir.display()
+        )
+    })?;
 
-    Ok(resolved.to_string_lossy().to_string())
+    // Path policies and bind arguments operate on strings; a lossy conversion
+    // would make them inspect a different path than the one bwrap mounts.
+    resolved.into_os_string().into_string().map_err(|path| {
+        format!(
+            "sandbox directory is not valid UTF-8: {}",
+            Path::new(&path).display()
+        )
+    })
 }
 
 /// Compute the start directory (prefer current dir if inside sandbox dir).
@@ -57,7 +69,10 @@ pub fn compute_start_dir(sandbox_dir: &str) -> String {
     let sandbox = Path::new(sandbox_dir);
 
     if current_dir == sandbox || current_dir.starts_with(sandbox) {
-        current_dir.to_string_lossy().to_string()
+        current_dir
+            .into_os_string()
+            .into_string()
+            .unwrap_or_else(|_| sandbox_dir.to_string())
     } else {
         sandbox_dir.to_string()
     }
@@ -153,12 +168,19 @@ pub fn update_manifest(
     dir_hash: &str,
     sandbox_dir: &str,
 ) -> Result<(), String> {
+    let manifest_dir = Path::new(manifest_path)
+        .parent()
+        .ok_or_else(|| format!("manifest path has no parent directory: {manifest_path}"))?;
+    reject_symlink_components(manifest_dir)?;
+
     let lock_path = format!("{manifest_path}.lock");
 
     // Open/create the lock file
     let lock_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&lock_path)
         .map_err(|e| format!("open lock file {lock_path}: {e}"))?;
 
@@ -170,7 +192,7 @@ pub fn update_manifest(
     }
 
     // Read existing manifest or start with empty array
-    let manifest_data = match fs::read_to_string(manifest_path) {
+    let manifest_data = match read_to_string_nofollow(manifest_path) {
         Ok(data) => data,
         Err(e) if e.kind() == io::ErrorKind::NotFound => "[]".to_string(),
         Err(e) => return Err(format!("read manifest {manifest_path}: {e}")),
@@ -186,16 +208,149 @@ pub fn update_manifest(
         "path": sandbox_dir,
     }));
 
-    // Write atomically via temp file
-    let tmp_path = format!("{manifest_path}.{}", std::process::id());
+    // Write atomically via an exclusively created temp file. The directory may
+    // contain entries planted by sandboxed code, so never open an existing path.
     let data =
         serde_json::to_string_pretty(&entries).map_err(|e| format!("serialize manifest: {e}"))?;
-    fs::write(&tmp_path, &data).map_err(|e| format!("write temp manifest {tmp_path}: {e}"))?;
+    let (tmp_path, mut tmp_file) = create_exclusive_temp(manifest_path)?;
+    if let Err(e) = tmp_file.write_all(data.as_bytes()) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("write temp manifest {tmp_path}: {e}"));
+    }
+    drop(tmp_file);
     fs::rename(&tmp_path, manifest_path)
         .map_err(|e| format!("rename manifest {tmp_path} → {manifest_path}: {e}"))?;
 
     // Lock is released when lock_file is dropped
     Ok(())
+}
+
+fn read_to_string_nofollow(path: &str) -> io::Result<String> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let mut data = String::new();
+    io::Read::read_to_string(&mut file, &mut data)?;
+    Ok(data)
+}
+
+/// Create a fresh `<prefix>.<unique>` file with O_CREAT|O_EXCL|O_NOFOLLOW.
+fn create_exclusive_temp(prefix: &str) -> Result<(String, fs::File), String> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..16 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let tmp_path = format!(
+            "{prefix}.{}-{}-{nanos:x}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp_path)
+        {
+            Ok(file) => return Ok((tmp_path, file)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("create temp file {tmp_path}: {e}")),
+        }
+    }
+    Err(format!(
+        "create temp file for {prefix}: too many collisions"
+    ))
+}
+
+/// Reject paths containing `.` or `..` components, so lexical prefix checks
+/// against a base directory cannot be bypassed by traversal.
+fn reject_traversal_components(path: &Path) -> Result<(), String> {
+    use std::path::Component;
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Err(format!(
+            "path must not contain '.' or '..' components: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Open `base/relative` as an `O_PATH` directory descriptor, refusing symlinks
+/// in `base` and in every component of `relative`.
+///
+/// The walk uses `openat(O_NOFOLLOW)` one component at a time, so a symlink
+/// planted beneath `base` cannot redirect the result. FD_CLOEXEC is cleared on
+/// the returned descriptor so bwrap can mount it with `--bind-fd`, which pins
+/// the verified directory against later replacement of the path.
+pub fn open_dir_fd_beneath(base: &str, relative: &Path) -> Result<OwnedFd, String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    const FLAGS: libc::c_int =
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+    fn open_at(dirfd: libc::c_int, name: &CString, display: &Path) -> Result<OwnedFd, String> {
+        let fd = unsafe { libc::openat(dirfd, name.as_ptr(), FLAGS) };
+        if fd < 0 {
+            let err = io::Error::last_os_error();
+            return Err(match err.raw_os_error() {
+                Some(libc::ELOOP) | Some(libc::ENOTDIR) => format!(
+                    "refusing to traverse symlink or non-directory: {}",
+                    display.display()
+                ),
+                _ => format!("open {}: {err}", display.display()),
+            });
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    let base_path = Path::new(base);
+    if !base_path.is_absolute() {
+        return Err(format!("delegated source base must be absolute: {base}"));
+    }
+    reject_symlink_components(base_path)?;
+    let base_c = CString::new(base_path.as_os_str().as_bytes())
+        .map_err(|_| format!("path contains NUL byte: {base}"))?;
+    let mut current = open_at(libc::AT_FDCWD, &base_c, base_path)?;
+    let mut display = base_path.to_path_buf();
+
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(format!(
+                "path must be relative and traversal-free: {}",
+                relative.display()
+            ));
+        };
+        display.push(part);
+        let part_c = CString::new(part.as_bytes())
+            .map_err(|_| format!("path contains NUL byte: {}", display.display()))?;
+        current = open_at(current.as_raw_fd(), &part_c, &display)?;
+    }
+
+    let flags = unsafe { libc::fcntl(current.as_raw_fd(), libc::F_GETFD) };
+    if flags < 0
+        || unsafe {
+            libc::fcntl(
+                current.as_raw_fd(),
+                libc::F_SETFD,
+                flags & !libc::FD_CLOEXEC,
+            )
+        } < 0
+    {
+        return Err(format!(
+            "clear FD_CLOEXEC on {}: {}",
+            display.display(),
+            io::Error::last_os_error()
+        ));
+    }
+
+    Ok(current)
 }
 
 /// Reject any path whose existing components include a symlink.
@@ -232,8 +387,15 @@ pub fn ensure_dirs(paths: &[String]) -> Result<(), String> {
 /// Create file (touch) at path if it doesn't exist, creating parent dirs as needed.
 pub fn ensure_files(paths: &[String]) -> Result<(), String> {
     for path in paths {
-        // If the path already exists (including as a dangling symlink), skip it.
+        // An existing entry may have been planted by sandboxed code with write
+        // access to the backing directory: only accept a real, user-owned file
+        // reached without traversing symlinks.
         if Path::new(path).symlink_metadata().is_ok() {
+            if let Some(parent) = Path::new(path).parent() {
+                reject_symlink_components(parent)?;
+            }
+            crate::socket::validate_existing_regular_file(path)
+                .map_err(|e| format!("state file {path}: {e}"))?;
             continue;
         }
         if let Some(parent) = Path::new(path).parent() {
@@ -296,6 +458,8 @@ pub fn copy_file(
     if !dest_path.is_absolute() {
         return Err(format!("copy destination must be absolute: {dest}"));
     }
+    reject_traversal_components(base_path)?;
+    reject_traversal_components(dest_path)?;
     if !dest_path.starts_with(base_path) {
         return Err(format!(
             "copy destination '{dest}' is outside copyFileBase '{allowed_base}'"
@@ -598,6 +762,27 @@ mod tests {
     }
 
     #[test]
+    fn detect_sandbox_dir_rejects_non_utf8_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let _guard = env_lock().lock().unwrap();
+        let original = std::env::var_os("CLOISTER_DIR");
+
+        let base = std::env::temp_dir().join(format!("cloister-nonutf8-{}", std::process::id()));
+        let bad = base.join(std::ffi::OsStr::from_bytes(b"proj\xff"));
+        fs::create_dir_all(&bad).unwrap();
+
+        std::env::set_var("CLOISTER_DIR", &bad);
+        let err = detect_sandbox_dir("git").unwrap_err();
+        assert!(err.contains("not valid UTF-8"));
+
+        match original {
+            Some(value) => std::env::set_var("CLOISTER_DIR", value),
+            None => std::env::remove_var("CLOISTER_DIR"),
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn start_dir_prefers_current_if_inside_sandbox() {
         let _guard = env_lock().lock().unwrap();
         let original = std::env::current_dir().unwrap();
@@ -713,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_files_does_not_follow_broken_symlink() {
+    fn ensure_files_rejects_broken_symlink() {
         let dir = std::env::temp_dir().join(format!("cloister-ensure-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let dest = dir.join("dest");
@@ -721,9 +906,127 @@ mod tests {
 
         std::os::unix::fs::symlink(&target, &dest).unwrap();
 
-        ensure_files(&[dest.to_str().unwrap().to_string()]).unwrap();
-
+        let err = ensure_files(&[dest.to_str().unwrap().to_string()]).unwrap_err();
+        assert!(err.contains("symlink"));
         assert!(!target.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_files_rejects_symlink_to_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloister-ensure-existing-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let dest = dir.join("dest");
+        let target = dir.join("target");
+        fs::write(&target, "host").unwrap();
+        std::os::unix::fs::symlink(&target, &dest).unwrap();
+
+        let err = ensure_files(&[dest.to_str().unwrap().to_string()]).unwrap_err();
+        assert!(err.contains("symlink"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_files_rejects_existing_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("cloister-ensure-dir-test-{}", std::process::id()));
+        let dest = dir.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        let err = ensure_files(&[dest.to_str().unwrap().to_string()]).unwrap_err();
+        assert!(err.contains("not a regular file"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_files_accepts_existing_regular_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloister-ensure-regular-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let dest = dir.join("dest");
+        fs::write(&dest, "state").unwrap();
+
+        ensure_files(&[dest.to_str().unwrap().to_string()]).unwrap();
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "state");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_does_not_follow_planted_temp_symlinks() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloister-manifest-symlink-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let manifest = dir.join("manifest.json");
+        let victim = dir.join("victim");
+        fs::write(&victim, "host data").unwrap();
+        // The old predictable temp name.
+        std::os::unix::fs::symlink(
+            &victim,
+            dir.join(format!("manifest.json.{}", std::process::id())),
+        )
+        .unwrap();
+
+        update_manifest(manifest.to_str().unwrap(), "abc123", "/home/user/p").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "host data");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_rejects_symlinked_lock_and_manifest() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloister-manifest-lock-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let manifest = dir.join("manifest.json");
+        let victim = dir.join("victim");
+        fs::write(&victim, "[]").unwrap();
+
+        std::os::unix::fs::symlink(&victim, dir.join("manifest.json.lock")).unwrap();
+        assert!(update_manifest(manifest.to_str().unwrap(), "abc123", "/p").is_err());
+        fs::remove_file(dir.join("manifest.json.lock")).unwrap();
+
+        std::os::unix::fs::symlink(&victim, &manifest).unwrap();
+        assert!(update_manifest(manifest.to_str().unwrap(), "abc123", "/p").is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "[]");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_file_rejects_parent_traversal_before_creating_dirs() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloister-copy-traversal-test-{}",
+            std::process::id()
+        ));
+        let base = dir.join("base");
+        fs::create_dir_all(&base).unwrap();
+        let src = dir.join("src");
+        fs::write(&src, "source").unwrap();
+        let dest = format!("{}/../outside/new/file", base.display());
+
+        let err = copy_file(
+            src.to_str().unwrap(),
+            &dest,
+            0o644,
+            true,
+            base.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("'..'"));
+        assert!(!dir.join("outside").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
