@@ -228,13 +228,13 @@ let
       shellLib = shells.${config.shell.name};
       basePackages = [
         pkgs.bash
-        pkgs.coreutils
+        pkgs.uutils-coreutils-noprefix
         pkgs.curl
-        pkgs.findutils
+        pkgs.uutils-findutils
         pkgs.gawk
         pkgs.git
         pkgs.gnugrep
-        pkgs.gnused
+        pkgs.uutils-sed
         pkgs.gnutar
         pkgs.gzip
         pkgs.less

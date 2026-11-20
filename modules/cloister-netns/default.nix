@@ -402,7 +402,7 @@ let
       wants = lib.optional needsNetworkOnline "network-online.target";
       wantedBy = [ "multi-user.target" ];
       path = [
-        pkgs.coreutils
+        pkgs.uutils-coreutils-noprefix
         pkgs.iproute2
         pkgs.wireguard-tools
       ];
@@ -462,7 +462,7 @@ let
       description = "Cloister ${typeName} namespace: ${name}";
       wantedBy = [ "multi-user.target" ];
       path = [
-        pkgs.coreutils
+        pkgs.uutils-coreutils-noprefix
         pkgs.iproute2
         pkgs.nftables
         pkgs.procps
@@ -629,7 +629,7 @@ let
       description = "Cloister isolated namespace: ${name}";
       wantedBy = [ "multi-user.target" ];
       path = [
-        pkgs.coreutils
+        pkgs.uutils-coreutils-noprefix
         pkgs.iproute2
       ];
       serviceConfig = {

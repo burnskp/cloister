@@ -104,7 +104,7 @@ let
               break
             fi
             attempt=$((attempt + 1))
-            ${pkgs.coreutils}/bin/sleep 0.1
+            ${pkgs.uutils-coreutils-noprefix}/bin/sleep 0.1
           done
 
           if [ ! -r "$info_path" ]; then
@@ -134,7 +134,7 @@ let
                 ;;
               *)
                 if [ -L "$entry" ]; then
-                  bwrap_args+=(--symlink "$(${pkgs.coreutils}/bin/readlink "$entry")" "/$base")
+                  bwrap_args+=(--symlink "$(${pkgs.uutils-coreutils-noprefix}/bin/readlink "$entry")" "/$base")
                 else
                   bwrap_args+=(--ro-bind "$entry" "/$base")
                 fi
@@ -392,7 +392,7 @@ let
 
       internalSymlinks = [
         {
-          target = "${pkgs.coreutils}/bin/env";
+          target = "${pkgs.uutils-coreutils-noprefix}/bin/env";
           link = "/usr/bin/env";
         }
         {
